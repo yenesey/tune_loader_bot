@@ -59,6 +59,32 @@ YTDL_OPTS = {
     # "verbose": True
 }
 
+class Database:
+    _instance = None
+    _conn = None
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls, *args, **kwargs)
+            if not os.path.isfile('downloads.db'):
+                cls._conn = sqlite3.connect('downloads.db')
+                cls._conn.execute('CREATE TABLE IF NOT EXISTS downloads (date DATETIME, user_id STRING, url STRING PRIMARY KEY, file_name STRING)')
+                #cls.execute('CREATE INDEX IF NOT EXISTS date_index ON downloads (date)')
+                cls._conn.commit()
+            else:
+                cls._conn = sqlite3.connect('downloads.db')
+        return cls._instance
+    
+    def check_url(self, url):
+        return self._conn.execute('SELECT date, file_name FROM downloads WHERE url = ?', [url]).fetchone()
+
+    def save(self, on_date, user_id, url, file_name):
+        self._conn.execute('INSERT INTO downloads(date, user_id, url, file_name) VALUES(?, ?, ? ,?) ',
+                [on_date, user_id, url, file_name]
+            )
+        self._conn.commit()
+
+DB = Database()
+
 ######################################################################
 class SecurityMiddleware(BaseMiddleware):
     async def __call__(
@@ -73,7 +99,6 @@ class SecurityMiddleware(BaseMiddleware):
                 logging.info('Unknown user: ' + str(user.id))
                 return   
         return await handler(event, data)
-
 
 ##############################################################
 async def download_yt_dlp(work_dir, url):
@@ -126,7 +151,7 @@ def get_dirs(on_date) -> (str, str):
     return (f'{SETTINGS["serverRootUrl"]}/{sub_dir}',
         os.path.join(SETTINGS["downloadFileDir"], sub_dir))
 
-def check_dir_exists(target_dir):
+def ensure_directory_exists(target_dir):
     if not os.path.isdir(target_dir):
         os.makedirs(target_dir)
 
@@ -135,8 +160,7 @@ async def download(message: Message):
     conn = None
     try:
         answer_message = await message.answer('Processing. Please wait for a while...')
-        conn = sqlite3.connect("downloads.db")
-        db_select = conn.execute('SELECT date, file_name FROM downloads WHERE url = ?', [message.text]).fetchone()
+        db_select = DB.check_url(message.text)
 
         if db_select is not None:
             on_date = datetime.strptime(db_select[0][:10], "%Y-%m-%d").date()
@@ -145,18 +169,14 @@ async def download(message: Message):
         else:
             on_date = datetime.now()
             server_dir, target_dir = get_dirs(on_date)
-            check_dir_exists(target_dir)
+            ensure_directory_exists(target_dir)
             target_file_name = await download_yt_dlp(target_dir, message.text)
 
             user_id = ''
             if message.from_user is not None:
                 user_id = str(message.from_user.id)
 
-            conn.execute('INSERT INTO downloads(date, user_id, url, file_name) VALUES(?, ?, ? ,?) ', 
-                [on_date, user_id, message.text, target_file_name]
-            )
-            conn.commit()
-            conn.close()
+            DB.save(on_date, user_id, message.text, target_file_name)
 
         if target_file_name is not None:
             artist, title = artist_title(target_file_name)
@@ -203,21 +223,13 @@ async def on_process_message(message: Message):
         if link_types[lnk].search(message.text):
             await download(message)
 
-
 ##############################################################
-
 async def main():
     bot = Bot(token = SETTINGS['telegramАpiToken'], default = DefaultBotProperties(parse_mode = 'HTML'))
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
     logging.basicConfig(format='%(asctime)s %(levelname)-8s %(message)s', level = logging.INFO, datefmt='%Y-%m-%d %H:%M:%S')
-    if not os.path.isfile('downloads.db'):
-        conn = sqlite3.connect('downloads.db')
-        conn.execute('CREATE TABLE IF NOT EXISTS downloads (date DATETIME, user_id STRING, url STRING PRIMARY KEY, file_name STRING)')
-        # db.execute('CREATE INDEX IF NOT EXISTS date_index ON downloads (date)')
-        conn.commit()
-        conn.close()
     dp.update.outer_middleware( SecurityMiddleware() )
     asyncio.run(main())
  

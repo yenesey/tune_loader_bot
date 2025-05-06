@@ -1,64 +1,63 @@
 #!/usr/bin/python3
-# https://github.com/flyingrub/scdl  -- install scdl and ffmpeg
-
 import logging
-
 import asyncio
-import logging
+import traceback
+import json
+import os
+import urllib.parse
+import re
+from datetime import datetime
+import sqlite3
 from typing import Any, Callable, Dict, Awaitable
 
-import traceback
-
-# aiogram
-from aiogram.exceptions import TelegramBadRequest
-from aiogram import Bot, Dispatcher, Router
-from aiogram.enums import ParseMode
-from aiogram.filters import Command, CommandStart, StateFilter
+from aiogram import Bot, Dispatcher #, Router
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
     TelegramObject,
     Message,
-    ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
     FSInputFile,
-    BufferedInputFile,
-    CallbackQuery,
+    InputMediaAudio,
     BotCommand,
-    InlineKeyboardButton
 )
 from aiogram.utils.markdown import hlink
 from aiogram.client.default import DefaultBotProperties
-
-# end aiogram
-
-import requests
-from io import BytesIO
-import json
-import os
-import asyncio
-import re
-from os import path
-import urllib.parse
-from mutagen.easyid3 import EasyID3
-
+######################################################################
 from yt_dlp import YoutubeDL
-from pathlib import Path
-
-# you must create 'settings.json' file:  
-settings = {
-    "telegram_api_token" : "***"
+from yt_dlp.utils import DownloadError
+######################################################################
+'''
+Example SETTINGS:
+{
+    "telegramАpiToken" : "***",
+    "usersList": [],
+    "poTokenGVS": "***",
+    "poTokenWeb": "***",
+    "downloadFileDir": "/var/www/***",
+    "serverRootUrl": "https://server/mp3",
 }
+'''
+SETTINGS = json.load( open('settings.json') )
 
-settings = json.load( open('settings.json') )
-dp = Dispatcher()
-
-name_symbols_blacklist = re.compile(r'[\0\/]')
-soundcloud_link = re.compile(r'^https://(m|on)?.?soundcloud')
-youtube_link = re.compile(r'^https://(?:www.)?(?:music.)?youtu(?:.be/|be.com/)?')
+YTDL_OPTS = {
+    "paths": {"temp" : SETTINGS["downloadFileDir"], "home": SETTINGS["downloadFileDir"]},
+    "extractor_args": {
+        "player_client" : "web",
+        "youtube" : {"po_token" : [f"web.gvs+{SETTINGS['poTokenGVS']}" , f"web.player+{SETTINGS['poTokenWeb']}" ]}
+    },
+    "cookiefile" : os.path.join(os.getcwd(), "cookies.txt"),
+    "postprocessors": [{
+        "key": "FFmpegExtractAudio",
+        "preferredcodec": "mp3",
+        "preferredquality": "192",
+    }],
+    "format": "bestaudio/best",
+    "outtmpl": "%(channel)s——%(artist)s——%(title)s",
+    "progress_hooks": None,
+    "postprocessor_hooks": None,
+    "overwrites": True,
+    # 'skip_download': True,
+    # "verbose": True
+}
 
 ######################################################################
 class SecurityMiddleware(BaseMiddleware):
@@ -68,160 +67,157 @@ class SecurityMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: Dict[str, Any]
     ) -> Any:
-        user = data['event_from_user']
-        if (user.id not in settings['users_list']):
-            logging.info('Unknown user: ' + str(user.id))
-            return   
+        if 'event_from_user' in data:
+            user = data['event_from_user']
+            if (user.id not in SETTINGS['usersList']):
+                logging.info('Unknown user: ' + str(user.id))
+                return   
         return await handler(event, data)
-##############################################################
 
-async def scdl(message: Message):
-
-    dowloaded_file = re.compile(r'^Downloading ([\w\W]+?)$', re.MULTILINE)
-    not_available_file = re.compile(r'^([\w\W]+?is not available in your location...)$', re.MULTILINE)
-    image_file = re.compile(r'img src=\"(https://[\w\W]+?.(?:jpg|jpeg|png|bmp))\"')
-
-    search = soundcloud_link.search(message.text)
-    search = search.groups()[0]
-    url = message.text
-    if search and search.lower() == 'on': # link from mobile app - need to get redirection url
-        res = requests.head(url, headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/106.0.0.0'} )
-        if (res.status_code == 302) and ('Location' in res.headers):
-            url = res.headers['Location']
-
-
-    # spawn subprocess:
-    #logging.info('soundcloud link from user: ' + str(message.from_user.id))
-    proc = await asyncio.create_subprocess_shell(
-        'cd temp; scdl --onlymp3 -l ' + url,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE)
-    stdout, stderr = await proc.communicate()
-    proc_output = ''
-    if stdout: proc_output = stdout.decode()
-    if stderr: proc_output += stderr.decode()
-    logging.info(proc_output)
-    logging.info(f'[scdl exited with {proc.returncode}]')
-    search = dowloaded_file.search(proc_output) # catch file_name from subprocess output
-
-    if (proc.returncode in (0,1)) and search:
-        not_avail = not_available_file.search(proc_output)
-        if not_avail:
-            await message.answer( search.groups()[0] + ' - is not available at your location' )
-            return
-
-        file_name = path.join('temp', name_symbols_blacklist.sub('', search.groups()[0]))    
-        if path.isfile( file_name + '.mp3'):
-            file_name += '.mp3'
-        elif path.isfile( file_name + '.flac'):
-            file_name += '.flac'
-        elif path.isfile( file_name + '.wav'):
-            file_name += '.wav'
-
-        audio_file = FSInputFile(file_name)
-        # search web-page for image
-        try:
-            res = requests.get( url, headers = {
-                'User-Agent' : 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 YaBrowser/23.3.0.2246 Yowser/2.5 Safari/537.36'
-            }) # , verify = False
-            search = image_file.search( res.text )
-            if search:
-                res = requests.get(search.groups()[0])
-                if res.status_code == 200:
-                    await message.answer_photo(BufferedInputFile(res.content, filename='preview'), caption = message.text)
-                    await message.answer_audio(audio_file, thumb=BufferedInputFile(res.content, filename='thumb'))
-            else:
-                await message.answer_audio(audio_file)
-        except Exception as e:
-            logging.error(traceback.format_exc())
-        finally:
-            await message.delete()
 
 ##############################################################
-async def ytdl(message: Message):
-    path_server = 'https://mp3'
-    path_mp3 = '/var/www/mp3'
-    dowloaded_file = re.compile(r'^\[ExtractAudio\](?: Destination: | Not converting audio )([\w\W\s\S]+?)(?:$|;)', re.MULTILINE)
-    rg_name_parts = re.compile(r'([\w\s\W]*)\s*(?:\-|\:|\—|\.|\/|\⧸)\s*([\w\W\s]*).mp3', re.IGNORECASE)
+async def download_yt_dlp(work_dir, url):
+    global YTDL_OPTS
 
-    url = message.text
+    result = None
+    def postproc(d):
+        nonlocal result
+        if d['status'] == 'finished':
+            base_name = os.path.basename(d['info_dict']['filename'])
+            result = base_name + '.mp3'
+            print('\n[postprocessor:finished] ' + base_name)
 
+    def progress(d):
+        nonlocal result
+        if d['status'] == 'finished':
+            base_name = os.path.basename(d['filename'])
+            result = base_name + '.mp3'
+            print('\n[progress:finished] ' + base_name)
+
+    YTDL_OPTS["paths"]["home"] = work_dir
+    YTDL_OPTS["progress_hooks"] = [progress]
+    YTDL_OPTS["postprocessor_hooks"] = [postproc]
     try:
-        # temp_message = await message.answer('Пробую стянуть аудио. Абажди...')
-        poTokenGVS = ""
-        poTokenWeb = ""
-        command = f'yt-dlp --extractor-args "youtube:player-client=web,default;youtube:po_token=web.gvs+{poTokenGVS},web.player+{poTokenWeb}" --cookies /home/denis/python/tune_loader_bot/cookies.txt --extract-audio --audio-format mp3 -o "%(channel)s-%(title)s.%(ext)s" {url}'
-
-        # spawn subprocess:
-        proc = await asyncio.create_subprocess_shell(
-            "cd " + path_mp3 + ';' + command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE)
-        stdout, stderr = await proc.communicate()
-        proc_output = ''
-        if stdout: proc_output = stdout.decode()
-        if stderr: proc_output += stderr.decode()
-        logging.info(proc_output)
-        logging.info(f'[yt-dlp exited with {proc.returncode}]')
-        search = dowloaded_file.search(proc_output) # catch file_name from subprocess output
-
-        if (proc.returncode == 0) and search:
-            file_name = search.groups()[0]
-            name_parts = rg_name_parts.search(file_name)
-
-            logging.info('received file:' + file_name)
-            file_full_name= path.join(path_mp3, name_symbols_blacklist.sub('', file_name))
-             
-            if os.path.getsize(file_full_name) < 50*1024*1024:
-                mp3file = EasyID3(file_full_name)
-                artist = ""
-                title = ""
-                if ("artist" not in mp3file) or ("title" not in mp3file):
-                    if (not name_parts is None) and (len(name_parts.groups()) == 2):
-                        title = name_parts.groups()[1]
-                        artist = name_parts.groups()[0]
-                else:
-                    title = mp3file["title"][0]
-                    artist = mp3file["artist"][0]
+        with YoutubeDL(YTDL_OPTS) as ydl:
+            await asyncio.to_thread(ydl.download, [url])
+    except DownloadError as e:
+        print(f"[error downloading:] {url}: {str(e)}")
     
-                await message.answer_audio(FSInputFile(file_full_name), title = title, performer = artist)
-                # await temp_message.delete()
-            else:
-                await message.answer(hlink(file_name, path_server + "/" + urllib.parse.quote(file_name)))
-                # await temp_message.edit_caption(path_server + "/" + file_name)
+    return result
+
+# name_symbols_blacklist = re.compile(r'[\0\/]')
+def artist_title(file_name) -> (str, str):
+    # extract artist and title from file name, assume delimiter is '——'
+    # example file_name: 'NA——Dusty Springfield——Dusty Springfield - Son Of A Preacher Man.mp3'
+    name_parts = [name.strip() for name in file_name.split('——') if name != 'NA']
+    title = ''
+    artist = ''
+    if len(name_parts) == 0:
+       raise Exception(f"something wrong with name parts:{file_name}")
+    elif len(name_parts) == 1:
+        title = name_parts[0][:-4]
+    else:
+        artist,title = name_parts[-2:]
+        title = title[:-4] # cut off ".mp3"
+    return artist, title
+
+def get_dirs(on_date) -> (str, str):
+    sub_dir = os.path.join(str(on_date.year), f'{str(on_date.year)}-{str(on_date.month).zfill(2)}')
+    return (f'{SETTINGS["serverRootUrl"]}/{sub_dir}',
+        os.path.join(SETTINGS["downloadFileDir"], sub_dir))
+
+def check_dir_exists(target_dir):
+    if not os.path.isdir(target_dir):
+        os.makedirs(target_dir)
+
+async def download(message: Message):
+    global SETTINGS
+    conn = None
+    try:
+        answer_message = await message.answer('Processing. Please wait for a while...')
+        conn = sqlite3.connect("downloads.db")
+        db_select = conn.execute('SELECT date, file_name FROM downloads WHERE url = ?', [message.text]).fetchone()
+
+        if db_select is not None:
+            on_date = datetime.strptime(db_select[0][:10], "%Y-%m-%d").date()
+            server_dir, target_dir = get_dirs(on_date)
+            target_file_name = db_select[1]
         else:
-            raise Exception('yt-dlp') 
+            on_date = datetime.now()
+            server_dir, target_dir = get_dirs(on_date)
+            check_dir_exists(target_dir)
+            target_file_name = await download_yt_dlp(target_dir, message.text)
+
+            user_id = ''
+            if message.from_user is not None:
+                user_id = str(message.from_user.id)
+
+            conn.execute('INSERT INTO downloads(date, user_id, url, file_name) VALUES(?, ?, ? ,?) ', 
+                [on_date, user_id, message.text, target_file_name]
+            )
+            conn.commit()
+            conn.close()
+
+        if target_file_name is not None:
+            artist, title = artist_title(target_file_name)
+            full_name = os.path.join(target_dir, target_file_name)
+            server_url = f'{server_dir}/{urllib.parse.quote(target_file_name)}'   
+            if os.path.getsize(full_name) < 50*1024*1024:
+                # await message.answer_audio(FSInputFile(full_name), title = title, performer = artist, caption = hlink("#link", server_url))
+                media = InputMediaAudio(media = FSInputFile(full_name), title = title, performer = artist, caption = hlink("#origin", message.text) + '  ' + hlink("#file", server_url))
+                await answer_message.edit_media(media)
+            else:
+                # await message.answer(hlink(f"{artist} - {title}", server_url)) 
+                await answer_message.edit_text(hlink(f"{artist} - {title}", server_url) + '\n' + hlink("#origin", message.text))
+            
+            await message.delete()
+        else:
+            raise Exception('download_yt_dlp')
            
     except Exception as e:
         logging.error(traceback.format_exc())
-        await message.answer('Что-то пошло не так...')
-    # finally:
-        # await message.delete()
-
-
-
+        await message.answer('something went wrong...')
+    finally:
+        if not conn is None:
+            conn.close()
 
 ##############################################################
-async def on_process_message(message: Message):
-    if (message is None) or (message.text is None):
-        return
-    # if soundcloud_link.search(message.text): 
-        # await scdl(message)
-    # el
-    if youtube_link.search(message.text):
-        await ytdl(message)
+link_types = {
+    'youtube':  re.compile(r'^https://(?:www.)?(?:music.)?youtu(?:.be/|be.com/)?'),
+    'soundcloud': re.compile(r'^https://(m|on)?.?soundcloud'),
+    'yandex': re.compile(r'https?://music\.yandex\.(?P<tld>ru|kz|ua|by|com)'),
+    'rutube': re.compile(r'https?://rutube\.ru/(?:(?:live/)?video(?:/private)?|(?:play/)?embed)/(?P<id>[\da-z]{32})'),
+    # 'coub' :  re.compile(r'(?:coub:|https?://(?:coub\.com/(?:view|embed|coubs)/|c-cdn\.coub\.com/fb-player\.swf\?.*\bcoub(?:ID|id)=))(?P<id>[\da-z]+)')
+}
 
-##############################################################
+dp = Dispatcher()
+
 @dp.channel_post()
 @dp.message()
-async def post(message: Message):
-    await on_process_message(message)
+async def on_process_message(message: Message):
+    global soundcloud_link
+    global youtube_link
+    if (message is None) or (message.text is None):
+        return
+    for lnk in link_types:
+        if link_types[lnk].search(message.text):
+            await download(message)
 
+
+##############################################################
 
 async def main():
-    bot = Bot(token = settings['telegram_api_token'], default=DefaultBotProperties(parse_mode = 'HTML'))
+    bot = Bot(token = SETTINGS['telegramАpiToken'], default = DefaultBotProperties(parse_mode = 'HTML'))
     await dp.start_polling(bot)
 
 if __name__ == '__main__':
     logging.basicConfig(format='%(asctime)s %(levelname)-8s %(message)s', level = logging.INFO, datefmt='%Y-%m-%d %H:%M:%S')
+    if not os.path.isfile('downloads.db'):
+        conn = sqlite3.connect('downloads.db')
+        conn.execute('CREATE TABLE IF NOT EXISTS downloads (date DATETIME, user_id STRING, url STRING PRIMARY KEY, file_name STRING)')
+        # db.execute('CREATE INDEX IF NOT EXISTS date_index ON downloads (date)')
+        conn.commit()
+        conn.close()
+    dp.update.outer_middleware( SecurityMiddleware() )
     asyncio.run(main())
+ 

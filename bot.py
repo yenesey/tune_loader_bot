@@ -64,7 +64,6 @@ YTDL_OPTS = {
     "progress_hooks": [],
     "postprocessor_hooks": [],
     "overwrites": True,
-    # 'skip_download': True,
     # "verbose": True
 }
 
@@ -79,23 +78,24 @@ class Database:
     async def create(cls):
         # if not os.path.isfile('downloads.db'):
         conn = await aiosqlite.connect('downloads.db')
-        await conn.execute('CREATE TABLE IF NOT EXISTS downloads (date DATETIME, user_id STRING, url STRING PRIMARY KEY, file_name STRING)')
+        await conn.execute('CREATE TABLE IF NOT EXISTS downloads (date DATETIME, user_id STRING, url STRING PRIMARY KEY, file_name STRING, file_size BIGINT)')
         await conn.commit()
         inst = cls()
         inst._conn = conn
         return inst
 
     async def find_url(self, url):
-        cursor = await self._conn.execute('SELECT date, file_name FROM downloads WHERE url = ?', [url])
+        cursor = await self._conn.execute('SELECT date, file_name, file_size FROM downloads WHERE url = ?', [url])
         fetch_data = await cursor.fetchone()
         return {
             "date" : datetime.strptime(fetch_data[0][:10], "%Y-%m-%d").date(),
-            "file_name" : fetch_data[1]
+            "file_name" : fetch_data[1],
+            "file_size" : fetch_data[2]
         } if fetch_data else None
 
-    async def save(self, on_date, user_id, url, file_name):
-        await self._conn.execute('INSERT INTO downloads(date, user_id, url, file_name) VALUES(?, ?, ? ,?) ',
-            [on_date, user_id, url, file_name]
+    async def save(self, on_date, user_id, url, file_name, file_size):
+        await self._conn.execute('INSERT INTO downloads(date, user_id, url, file_name, file_size) VALUES(?, ?, ?, ?, ?)',
+            [on_date, user_id, url, file_name, file_size]
         )
         await self._conn.commit()
 
@@ -141,14 +141,10 @@ async def download_yt_dlp(work_dir, url, video = False):
                 result = os.path.basename(d['info_dict']['filename'])
 
     opts = copy.deepcopy(YTDL_OPTS)
+    opts["logger"] = logging
     opts["paths"]["home"] = work_dir
     opts["postprocessor_hooks"] = [postproc]
-  
-    if video:
-        opts["postprocessors"] = [opts["postprocessors"][1]]
-    else:
-        opts["postprocessors"] = [opts["postprocessors"][0]]
-        # del opts["postprocessor_args"]
+    del opts["postprocessors"][int(not video)] # remove unwanted postprocessor
 
     try:
         with YoutubeDL(opts) as ydl:
@@ -158,10 +154,11 @@ async def download_yt_dlp(work_dir, url, video = False):
     
     return result
 
-# name_symbols_blacklist = re.compile(r'[\0\/]')
 def artist_title(file_name) -> (str, str):
-    # extract artist and title from file name, assume delimiter is '——'
-    # example file_name: 'NA——Dusty Springfield——Dusty Springfield - Son Of A Preacher Man.mp3'
+    '''
+    extract artist and title from file name, assume delimiter is '——'
+    example file_name: 'NA——Dusty Springfield——Dusty Springfield - Son Of A Preacher Man.mp3'
+    '''
     name_parts = [name.strip() for name in file_name.split('——') if name != 'NA']
     title = ''
     artist = ''
@@ -189,57 +186,51 @@ def ensure_directory_exists(target_dir):
 
 async def download(message: Message, key: str):
     try:
-        url = message.text
-        on_date = datetime.now()
-        answer_message = await message.answer('Processing. Please wait for a while...')
-        found = await DB.find_url(url)
+        if key == 'youtube-video':
+            url = message.text[1:]
+            InputMedia = InputMediaVideo
+        else:
+            url = message.text
+            InputMedia = InputMediaAudio
+
+        instant_answer = await message.answer('Processing. Please wait for a while...')
+        found = await DB.find_url(message.text)
         if found:
             on_date = found["date"]
             target_dir = get_download_dir(on_date)
-            target_file_name = found["file_name"]
+            file_name = found["file_name"]
+            file_name_path = os.path.join(target_dir, file_name)
+            file_size = found["file_size"]
         else:
+            on_date = datetime.now()
             target_dir = get_download_dir(on_date)
             ensure_directory_exists(target_dir)
-            if key == 'youtube-video':
-                target_file_name = await download_yt_dlp(target_dir, url[2:], True)
-            else:
-                target_file_name = await download_yt_dlp(target_dir, url, False)
-            user_id = ''
-            if message.from_user:
-                user_id = str(message.from_user.id)
-            await DB.save(on_date, user_id, url, target_file_name)
-
-        if target_file_name:
-            artist, title = artist_title(target_file_name)
-            full_name = os.path.join(target_dir, target_file_name)
-            server_url = get_server_url(on_date, target_file_name)
-            if os.path.getsize(full_name) < 50*1024*1024:
-                # await message.answer_audio(FSInputFile(full_name), title = title, performer = artist, caption = hlink("#link", server_url))
-                media = None
-                if key == 'youtube-video':
-                    media = InputMediaVideo(media = FSInputFile(full_name), title = title, performer = artist,
-                        caption = hlink("#origin", url[2:]) + '  ' + hlink("#file", server_url))
-                else:
-                    media = InputMediaAudio(media = FSInputFile(full_name), title = title, performer = artist,
+            file_name = await download_yt_dlp(target_dir, url, key == 'youtube-video')
+            file_name_path = os.path.join(target_dir, file_name)
+            file_size = os.path.getsize(file_name_path)
+            await DB.save(on_date, (str(message.from_user.id) if message.from_user else None), message.text, file_name, file_size)
+ 
+        if file_name:
+            artist, title = artist_title(file_name)
+            server_url = get_server_url(on_date, file_name)
+            if file_size < 50*1024*1024:
+                await instant_answer.edit_media(
+                    InputMedia(media = FSInputFile(file_name_path), title = title, performer = artist,
                         caption = hlink("#origin", url) + '  ' + hlink("#file", server_url))
-                await answer_message.edit_media(media)
-                
+                )
             else:
-                # await message.answer(hlink(f"{artist} - {title}", server_url)) 
-                await answer_message.edit_text(hlink(f"{artist} - {title}", server_url) + '\n' + hlink("#origin", message.text))
-            
+                await instant_answer.edit_text(hlink(f"{artist} - {title}", server_url) + '\n' + hlink("#origin", message.text))
             await message.delete()
-        else:
-            raise Exception('download_yt_dlp')         
+      
     except Exception as e:
         logging.error(traceback.format_exc())
-        await message.answer('something went wrong...')
+        await message.answer('Something went wrong...')
 
 
 ##############################################################
 link_types = {
     'youtube':  re.compile(r'^https://(?:www.)?(?:music.)?youtu(?:.be/|be.com/)?'),
-    'youtube-video':  re.compile(r'^v:https://(?:www.)?(?:music.)?youtu(?:.be/|be.com/)?'),
+    'youtube-video':  re.compile(r'^Vhttps://(?:www.)?(?:music.)?youtu(?:.be/|be.com/)?'),
     'soundcloud': re.compile(r'^https://(m|on)?.?soundcloud'),
     'yandex': re.compile(r'https?://music\.yandex\.(?P<tld>ru|kz|ua|by|com)'),
     'rutube': re.compile(r'https?://rutube\.ru/(?:(?:live/)?video(?:/private)?|(?:play/)?embed)/(?P<id>[\da-z]{32})'),

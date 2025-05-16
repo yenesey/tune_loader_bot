@@ -39,12 +39,13 @@ Example SETTINGS:
 }
 '''
 SETTINGS = json.load( open('settings.json') )
+NAME_DELIMITER = "—"
 
 YTDL_OPTS = {
     "paths": {"temp" : SETTINGS["download-dir"], "home": SETTINGS["download-dir"]},
     "extractor_args": {
         "player_client" : "web",
-        "youtube" : {"po_token" : [f"web.gvs+{SETTINGS['po-token-gvs']}" , f"web.player+{SETTINGS['po-token-web']}" ]}
+        "youtube" : {"po_token" : [f'web.gvs+{SETTINGS["po-token-gvs"]}', f'web.player+{SETTINGS["po-token-web"]}' ]}
     },
     "cookiefile" : os.path.join(os.getcwd(), "cookies.txt"),
     "postprocessors": [{
@@ -60,7 +61,8 @@ YTDL_OPTS = {
         # "videoconvertor": ["-c:v", "libx264", "-preset",  "fast", "-crf", "23", "-c:a", "aac", "-b:a" "128k"]
     # },
     "format": "bestvideo*+bestaudio/best",
-    "outtmpl": "%(channel)s——%(artist)s——%(title)s.%(ext)s",
+    "outtmpl": f"%(channel)s{NAME_DELIMITER}%(artist)s{NAME_DELIMITER}%(title)s.%(ext)s",
+    "outtmpl_na_placeholder": "",
     "progress_hooks": [],
     "postprocessor_hooks": [],
     "overwrites": True,
@@ -76,16 +78,18 @@ class Database:
     
     @classmethod
     async def create(cls):
-        # if not os.path.isfile('downloads.db'):
-        conn = await aiosqlite.connect('downloads.db')
-        await conn.execute('CREATE TABLE IF NOT EXISTS downloads (date DATETIME, user_id STRING, url STRING PRIMARY KEY, file_name STRING, file_size BIGINT)')
+        # if not os.path.isfile("downloads.db"):
+        conn = await aiosqlite.connect("downloads.db")
+        await conn.execute("CREATE TABLE IF NOT EXISTS downloads (date DATETIME, user_id STRING, url STRING, video BOOLEAN, file_name STRING, file_size BIGINT)")
+        await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS url_and_type ON downloads (url, video)")
         await conn.commit()
         inst = cls()
         inst._conn = conn
         return inst
 
-    async def find_url(self, url):
-        cursor = await self._conn.execute('SELECT date, file_name, file_size FROM downloads WHERE url = ?', [url])
+    async def find_url(self, url, video = False):
+        logging.info(f'Search for: {url} where Video = {str(int(video))}' )
+        cursor = await self._conn.execute("SELECT date, file_name, file_size FROM downloads WHERE url = ? and video = ?", [url, int(video)])
         fetch_data = await cursor.fetchone()
         return {
             "date" : datetime.strptime(fetch_data[0][:10], "%Y-%m-%d").date(),
@@ -93,9 +97,9 @@ class Database:
             "file_size" : fetch_data[2]
         } if fetch_data else None
 
-    async def save(self, on_date, user_id, url, file_name, file_size):
-        await self._conn.execute('INSERT INTO downloads(date, user_id, url, file_name, file_size) VALUES(?, ?, ?, ?, ?)',
-            [on_date, user_id, url, file_name, file_size]
+    async def save(self, on_date, user_id, url, video, file_name, file_size):
+        await self._conn.execute("INSERT INTO downloads(date, user_id, url, video, file_name, file_size) VALUES(?, ?, ?, ?, ?, ?)",
+            [on_date, user_id, url, video, file_name, file_size]
         )
         await self._conn.commit()
 
@@ -109,61 +113,53 @@ class SecurityMiddleware(BaseMiddleware):
         event: TelegramObject,
         data: Dict[str, Any]
     ) -> Any:
-        if 'event_from_user' in data:
-            user = data['event_from_user']
-            if (user.id not in SETTINGS['users-list']):
-                logging.info('Unknown user: ' + str(user.id))
+        if "event_from_user" in data:
+            user = data["event_from_user"]
+            if (user.id not in SETTINGS["users-list"]):
+                logging.info(f'Unknown user: {str(user.id)}')
                 return   
         return await handler(event, data)
 
 ##############################################################
-async def download_yt_dlp(work_dir, url, video = False):
+async def download_yt_dlp(work_dir, url, video = False) -> str:
     result = None
+
     def postproc(d):
         nonlocal result
-        if result:
-            return
-
-        if d["postprocessor"] == 'ExtractAudio':
-            if d['status'] == 'finished':
-                filename = os.path.basename(d['info_dict']['filename'])
-                result = filename[:filename.rfind('.')] + '.mp3'
-                logging.info('[ExtractAudio:finished] ' + result)
-
-        if d["postprocessor"] == 'VideoConvertor':
-            if d['status'] == 'finished':
-                filename = os.path.basename(d['info_dict']['filename'])
-                result = filename[:filename.rfind('.')] + '.mp4'
-                logging.info('[VideoConvertor:finished] ' + result)
-
-        if d["postprocessor"] == 'MoveFiles':
-            if d['status'] == 'finished':
-                result = os.path.basename(d['info_dict']['filename'])
+        file_types = {
+            "ExtractAudio" : ".mp3",
+            "VideoConvertor": ".mp4",
+        }
+        if not result:
+            pp = d["postprocessor"]
+            if pp in ("ExtractAudio", "VideoConvertor"):
+                if d["status"] == "finished":
+                    filename = os.path.basename(d["info_dict"]["filename"])
+                    result = filename[:filename.rfind(".")] + file_types[pp]
+                    logging.info(f'{pp}: {result}')
 
     opts = copy.deepcopy(YTDL_OPTS)
     opts["logger"] = logging
     opts["paths"]["home"] = work_dir
     opts["postprocessor_hooks"] = [postproc]
-    del opts["postprocessors"][int(not video)] # remove unwanted postprocessor
+    del opts["postprocessors"][int(not video)] # remove unwanted postprocessor from copy
 
     try:
         with YoutubeDL(opts) as ydl:
             await asyncio.to_thread(ydl.download, [url])
     except DownloadError as e:
-        print(f"[error downloading:] {url}: {str(e)}")
-    
+        print(f'Error downloading: {url}: {str(e)}')
     return result
 
 def artist_title(file_name) -> (str, str):
     '''
-    extract artist and title from file name, assume delimiter is '——'
-    example file_name: 'NA——Dusty Springfield——Dusty Springfield - Son Of A Preacher Man.mp3'
+    extract <artist> and <title> from file name
     '''
-    name_parts = [name.strip() for name in file_name.split('——') if name != 'NA']
-    title = ''
-    artist = ''
+    name_parts = [name.strip() for name in file_name.split(NAME_DELIMITER) if name != ""]
+    title = ""
+    artist = ""
     if len(name_parts) == 0:
-       raise Exception(f"something wrong with name parts:{file_name}")
+       raise Exception(f'something wrong with name parts:{file_name}')
     elif len(name_parts) == 1:
         title = name_parts[0][:-4]
     else:
@@ -185,16 +181,18 @@ def ensure_directory_exists(target_dir):
         os.makedirs(target_dir)
 
 async def download(message: Message, key: str):
-    try:
-        if key == 'youtube-video':
-            url = message.text[1:]
-            InputMedia = InputMediaVideo
-        else:
-            url = message.text
-            InputMedia = InputMediaAudio
+    video = key == "youtube-video"
+    if video:
+        url = message.text[1:]
+        InputMedia = InputMediaVideo
+    else:
+        url = message.text
+        InputMedia = InputMediaAudio
+    logging.info("Received URL: " + url)
 
-        instant_answer = await message.answer('Processing. Please wait for a while...')
-        found = await DB.find_url(message.text)
+    try:
+        instant_answer = await message.answer("Processing. Please wait for a while...")
+        found = await DB.find_url(url, video)
         if found:
             on_date = found["date"]
             target_dir = get_download_dir(on_date)
@@ -205,10 +203,11 @@ async def download(message: Message, key: str):
             on_date = datetime.now()
             target_dir = get_download_dir(on_date)
             ensure_directory_exists(target_dir)
-            file_name = await download_yt_dlp(target_dir, url, key == 'youtube-video')
+            file_name = await download_yt_dlp(target_dir, url, video)
             file_name_path = os.path.join(target_dir, file_name)
             file_size = os.path.getsize(file_name_path)
-            await DB.save(on_date, (str(message.from_user.id) if message.from_user else None), message.text, file_name, file_size)
+            user_id = str(message.from_user.id) if message.from_user else None
+            await DB.save(on_date, user_id, url, video, file_name, file_size)
  
         if file_name:
             artist, title = artist_title(file_name)
@@ -216,24 +215,24 @@ async def download(message: Message, key: str):
             if file_size < 50*1024*1024:
                 await instant_answer.edit_media(
                     InputMedia(media = FSInputFile(file_name_path), title = title, performer = artist,
-                        caption = hlink("#origin", url) + '  ' + hlink("#file", server_url))
+                        caption = hlink("#origin", url) + "  " + hlink("#file", server_url))
                 )
             else:
-                await instant_answer.edit_text(hlink(f"{artist} - {title}", server_url) + '\n' + hlink("#origin", message.text))
+                await instant_answer.edit_text(hlink(f"{artist} - {title}", server_url) + "\n" + hlink("#origin", url))
             await message.delete()
       
     except Exception as e:
         logging.error(traceback.format_exc())
-        await message.answer('Something went wrong...')
+        await message.answer("Something went wrong...")
 
 
 ##############################################################
 link_types = {
-    'youtube':  re.compile(r'^https://(?:www.)?(?:music.)?youtu(?:.be/|be.com/)?'),
-    'youtube-video':  re.compile(r'^Vhttps://(?:www.)?(?:music.)?youtu(?:.be/|be.com/)?'),
-    'soundcloud': re.compile(r'^https://(m|on)?.?soundcloud'),
-    'yandex': re.compile(r'https?://music\.yandex\.(?P<tld>ru|kz|ua|by|com)'),
-    'rutube': re.compile(r'https?://rutube\.ru/(?:(?:live/)?video(?:/private)?|(?:play/)?embed)/(?P<id>[\da-z]{32})'),
+    "youtube":  re.compile(r'^https://(?:www.)?(?:music.)?youtu(?:.be/|be.com/)?'),
+    "youtube-video":  re.compile(r'^[V|v|!|#|В|в]https://(?:www.)?(?:music.)?youtu(?:.be/|be.com/)?'),
+    "soundcloud": re.compile(r'^https://(m|on)?.?soundcloud'),
+    "yandex": re.compile(r'https?://music\.yandex\.(?P<tld>ru|kz|ua|by|com)'),
+    "rutube": re.compile(r'https?://rutube\.ru/(?:(?:live/)?video(?:/private)?|(?:play/)?embed)/(?P<id>[\da-z]{32})'),
     # 'coub' :  re.compile(r'(?:coub:|https?://(?:coub\.com/(?:view|embed|coubs)/|c-cdn\.coub\.com/fb-player\.swf\?.*\bcoub(?:ID|id)=))(?P<id>[\da-z]+)')
 }
 
@@ -251,11 +250,11 @@ async def on_process_message(message: Message):
 async def main():
     global DB
     DB = await Database.create()
-    bot = Bot(token = SETTINGS['telegram-api-token'], default = DefaultBotProperties(parse_mode = 'HTML'))
+    bot = Bot(token = SETTINGS["telegram-api-token"], default = DefaultBotProperties(parse_mode = "HTML"))
     await dp.start_polling(bot)
 
-if __name__ == '__main__':
-    logging.basicConfig(format='%(asctime)s %(levelname)-8s %(message)s', level = logging.INFO, datefmt='%Y-%m-%d %H:%M:%S')
+if __name__ == "__main__":
+    logging.basicConfig(format="%(asctime)s %(levelname)-8s %(message)s", level = logging.INFO, datefmt="%Y-%m-%d %H:%M:%S")
     dp.update.outer_middleware( SecurityMiddleware() )
     asyncio.run(main())
  

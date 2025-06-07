@@ -88,7 +88,6 @@ class Database:
         return inst
 
     async def find_url(self, url, video = False):
-        logging.info(f'Search for: {url} where Video = {str(int(video))}' )
         cursor = await self._conn.execute("SELECT date, file_name, file_size FROM downloads WHERE url = ? and video = ?", [url, int(video)])
         fetch_data = await cursor.fetchone()
         return {
@@ -146,6 +145,7 @@ async def download_yt_dlp(work_dir, url, video = False) -> str:
 
     try:
         with YoutubeDL(opts) as ydl:
+            logging.info(f'Schedule download: {url}' )
             await asyncio.to_thread(ydl.download, [url])
     except DownloadError as e:
         print(f'Error downloading: {url}: {str(e)}')
@@ -181,10 +181,19 @@ def ensure_directory_exists(target_dir):
         os.makedirs(target_dir)
 
 async def download(message: Message, key: str):
-    video = key == "youtube-video"
-    if video:
+    video = False
+    if key == "youtube-video":
+        video = True
         url = message.text[1:]
         InputMedia = InputMediaVideo
+    elif key == "coub":
+        video = True
+        url = message.text
+        InputMedia = InputMediaVideo  
+    elif key == 'tiktok':
+        video = True
+        url = message.text
+        InputMedia = InputMediaVideo  
     else:
         url = message.text
         InputMedia = InputMediaAudio
@@ -204,10 +213,11 @@ async def download(message: Message, key: str):
             target_dir = get_download_dir(on_date)
             ensure_directory_exists(target_dir)
             file_name = await download_yt_dlp(target_dir, url, video)
-            file_name_path = os.path.join(target_dir, file_name)
-            file_size = os.path.getsize(file_name_path)
-            user_id = str(message.from_user.id) if message.from_user else None
-            await DB.save(on_date, user_id, url, video, file_name, file_size)
+            if file_name:
+                file_name_path = os.path.join(target_dir, file_name)
+                file_size = os.path.getsize(file_name_path)
+                user_id = str(message.from_user.id) if message.from_user else None
+                await DB.save(on_date, user_id, url, video, file_name, file_size)
  
         if file_name:
             artist, title = artist_title(file_name)
@@ -220,6 +230,8 @@ async def download(message: Message, key: str):
             else:
                 await instant_answer.edit_text(hlink(f"{artist} - {title}", server_url) + "\n" + hlink("#origin", url))
             await message.delete()
+        else:
+            await message.answer("Something went wrong...")
       
     except Exception as e:
         logging.error(traceback.format_exc())
@@ -231,9 +243,10 @@ link_types = {
     "youtube":  re.compile(r'^https://(?:www.)?(?:music.)?youtu(?:.be/|be.com/)?'),
     "youtube-video":  re.compile(r'^[V|v|!|#|В|в]https://(?:www.)?(?:music.)?youtu(?:.be/|be.com/)?'),
     "soundcloud": re.compile(r'^https://(m|on)?.?soundcloud'),
-    "yandex": re.compile(r'https?://music\.yandex\.(?P<tld>ru|kz|ua|by|com)'),
-    "rutube": re.compile(r'https?://rutube\.ru/(?:(?:live/)?video(?:/private)?|(?:play/)?embed)/(?P<id>[\da-z]{32})'),
-    # 'coub' :  re.compile(r'(?:coub:|https?://(?:coub\.com/(?:view|embed|coubs)/|c-cdn\.coub\.com/fb-player\.swf\?.*\bcoub(?:ID|id)=))(?P<id>[\da-z]+)')
+    "yandex": re.compile(r'^https?://music\.yandex\.(?P<tld>ru|kz|ua|by|com)'),
+    "rutube": re.compile(r'^https?://rutube\.ru/(?:(?:live/)?video(?:/private)?|(?:play/)?embed)/(?P<id>[\da-z]{32})'),
+    "coub" :  re.compile(r'^(?:coub:|https?://(?:coub\.com/(?:view|embed|coubs)/|c-cdn\.coub\.com/fb-player\.swf\?.*\bcoub(?:ID|id)=))(?P<id>[\da-z]+)'),
+    "tiktok": re.compile(r'^https://(?:www.)?(?:vt.)?tiktok.com/'),
 }
 
 dp = Dispatcher()

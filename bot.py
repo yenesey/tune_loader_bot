@@ -61,7 +61,8 @@ YTDL_OPTS = {
         # "videoconvertor": ["-c:v", "libx264", "-preset",  "fast", "-crf", "23", "-c:a", "aac", "-b:a" "128k"]
     # },
     "format": "bestvideo*+bestaudio/best",
-    "outtmpl": f"%(channel)s{NAME_DELIMITER}%(artist)s{NAME_DELIMITER}%(title)s.%(ext)s",
+    # "outtmpl": f"%(channel)s{NAME_DELIMITER}%(artist)s{NAME_DELIMITER}%(title).50s.%(ext)s",
+    "outtmpl": f"%(id)s",
     "outtmpl_na_placeholder": "",
     "progress_hooks": [],
     "postprocessor_hooks": [],
@@ -80,7 +81,7 @@ class Database:
     async def create(cls):
         # if not os.path.isfile("downloads.db"):
         conn = await aiosqlite.connect("downloads.db")
-        await conn.execute("CREATE TABLE IF NOT EXISTS downloads (date DATETIME, user_id STRING, url STRING, video BOOLEAN, file_name STRING, file_size BIGINT)")
+        await conn.execute("CREATE TABLE IF NOT EXISTS downloads (date DATETIME, user_id STRING, url STRING, video BOOLEAN, file_name STRING, file_size BIGINT, title STRING)")
         await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS url_and_type ON downloads (url, video)")
         await conn.commit()
         inst = cls()
@@ -88,16 +89,17 @@ class Database:
         return inst
 
     async def find_url(self, url, video = False):
-        cursor = await self._conn.execute("SELECT date, file_name, file_size FROM downloads WHERE url = ? and video = ?", [url, int(video)])
+        cursor = await self._conn.execute("SELECT date, file_name, file_size, title FROM downloads WHERE url = ? and video = ?", [url, int(video)])
         fetch_data = await cursor.fetchone()
         return {
             "date" : datetime.strptime(fetch_data[0][:10], "%Y-%m-%d").date(),
             "file_name" : fetch_data[1],
-            "file_size" : fetch_data[2]
+            "file_size" : fetch_data[2],
+            "title" : fetch_data[3],
         } if fetch_data else None
 
-    async def save(self, on_date, user_id, url, video, file_name, file_size):
-        await self._conn.execute("INSERT INTO downloads(date, user_id, url, video, file_name, file_size) VALUES(?, ?, ?, ?, ?, ?)",
+    async def save(self, on_date, user_id, url, video, file_name, file_size, title):
+        await self._conn.execute("INSERT INTO downloads(date, user_id, url, video, file_name, file_size, title) VALUES(?, ?, ?, ?, ?, ?, ?)",
             [on_date, user_id, url, video, file_name, file_size]
         )
         await self._conn.commit()
@@ -120,7 +122,7 @@ class SecurityMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 ##############################################################
-async def download_yt_dlp(work_dir, url, video = False) -> str:
+async def download_yt_dlp(work_dir, url, video = False) -> dict:
     result = None
 
     def postproc(d):
@@ -133,9 +135,14 @@ async def download_yt_dlp(work_dir, url, video = False) -> str:
             pp = d["postprocessor"]
             if pp in ("ExtractAudio", "VideoConvertor"):
                 if d["status"] == "finished":
-                    filename = os.path.basename(d["info_dict"]["filename"])
-                    result = filename[:filename.rfind(".")] + file_types[pp]
-                    logging.info(f'{pp}: {result}')
+                    filename = d["info_dict"]["filename"]
+                    filename = filename[:filename.rfind(".")] + file_types[pp]
+                    result = { 
+                        "file_name" : os.path.basename(filename),
+                        "file_size" : os.path.getsize(filename),
+                        "title" : d["info_dict"]["title"],
+                    }
+                    logging.info(f'{pp}: {filename}')
 
     opts = copy.deepcopy(YTDL_OPTS)
     opts["logger"] = logging
@@ -201,27 +208,28 @@ async def download(message: Message, key: str):
 
     try:
         instant_answer = await message.answer("Processing. Please wait for a while...")
+        file_name_path = ""
         found = await DB.find_url(url, video)
         if found:
             on_date = found["date"]
             target_dir = get_download_dir(on_date)
-            file_name = found["file_name"]
-            file_name_path = os.path.join(target_dir, file_name)
-            file_size = found["file_size"]
+            file_name_path = os.path.join(target_dir, found["file_name"])
         else:
             on_date = datetime.now()
             target_dir = get_download_dir(on_date)
             ensure_directory_exists(target_dir)
-            file_name = await download_yt_dlp(target_dir, url, video)
-            if file_name:
-                file_name_path = os.path.join(target_dir, file_name)
-                file_size = os.path.getsize(file_name_path)
+            download = await download_yt_dlp(target_dir, url, video)
+
+            if download:
+                file_name_path = os.path.join(target_dir, download["file_name"])
                 user_id = str(message.from_user.id) if message.from_user else None
-                await DB.save(on_date, user_id, url, video, file_name, file_size)
- 
-        if file_name:
-            artist, title = artist_title(file_name)
-            server_url = get_server_url(on_date, file_name)
+                await DB.save(on_date, user_id, url, video, download["file_name"], download["file_size"], download["title"])
+    
+        result = found or download
+
+        if result:
+            artist, title = artist_title(result["title"])
+            server_url = get_server_url(on_date, result["file_name"])
             if file_size < 50*1024*1024:
                 await instant_answer.edit_media(
                     InputMedia(media = FSInputFile(file_name_path), title = title, performer = artist,

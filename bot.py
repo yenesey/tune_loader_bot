@@ -11,7 +11,9 @@ from datetime import datetime
 import copy
 from typing import Any, Callable, Dict, Awaitable
 
+from aiogram.filters import Command, CommandStart, StateFilter
 from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram import Bot, Dispatcher #, Router
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
@@ -22,6 +24,7 @@ from aiogram.types import (
     InputMediaAudio,
     InputMediaVideo,
     BotCommand,
+    CallbackQuery,
     InlineKeyboardButton,
 )
 from aiogram.utils.markdown import hlink
@@ -74,9 +77,11 @@ YTDL_OPTS = {
     # "verbose": True
 }
 
+USER_DATA = {}
+
+
 class TuneLoaderStates(StatesGroup):
     select_action = State()
-    execute_action = State()
 
 
 class Database:
@@ -190,23 +195,12 @@ def ensure_directory_exists(target_dir):
     if not os.path.isdir(target_dir):
         os.makedirs(target_dir)
 
-async def download(message: Message, key: str):
-    video = False
-    if key == "youtube-video":
-        video = True
-        url = message.text[1:]
+async def download(message: Message, video: bool):
+    url = message.text
+    InputMedia = InputMediaAudio
+    if video:
         InputMedia = InputMediaVideo
-    elif key == "coub":
-        video = True
-        url = message.text
-        InputMedia = InputMediaVideo  
-    elif key == 'tiktok':
-        video = True
-        url = message.text
-        InputMedia = InputMediaVideo  
-    else:
-        url = message.text
-        InputMedia = InputMediaAudio
+
     logging.info("Received URL: " + url)
 
     try:
@@ -255,8 +249,7 @@ async def download(message: Message, key: str):
 
 ##############################################################
 link_types = {
-    "youtube":  re.compile(r'^https://(?:www.)?(?:music.)?youtu(?:.be/|be.com/)?'),
-    "youtube-video":  re.compile(r'^[V|v|!|#|В|в]https://(?:www.)?(?:music.)?youtu(?:.be/|be.com/)?'),
+    "youtube": re.compile(r'^https://(?:www.)?(?:music.)?youtu(?:.be/|be.com/)?'),
     "soundcloud": re.compile(r'^https://(m|on)?.?soundcloud'),
     "yandex": re.compile(r'^https?://music\.yandex\.(?P<tld>ru|kz|ua|by|com)'),
     "rutube": re.compile(r'^https?://rutube\.ru/(?:(?:live/)?video(?:/private)?|(?:play/)?embed)/(?P<id>[\da-z]{32})'),
@@ -264,16 +257,49 @@ link_types = {
     "tiktok": re.compile(r'^https://(?:www.)?(?:vt.)?tiktok.com/'),
 }
 
+options = {
+    "youtube": ("audio", "video"),
+    "soundcloud": ("audio"),
+    "yandex": ("audio"), 
+    "rutube": ("audio"),
+    "coub" : ("audio", "video"),
+    "tiktok": ("video"),
+}
+
+buttons = {
+    "audio": ('🎶Audio', 'audio'),
+    "video": ('🎞Video', 'video'),
+}
+
 dp = Dispatcher()
 
-
-@dp.channel_post()
+@dp.callback_query(StateFilter(TuneLoaderStates.select_action))
+async def inline_kb_answer_callback_handler(query: CallbackQuery, state: FSMContext):
+    await query.answer()
+    await query.bot.delete_message(chat_id = query.message.chat.id, message_id = query.message.message_id)
+    if query.data != 'exit':
+        await download(USER_DATA[query.from_user.id], query.data == 'video')
+    await state.clear()
+ 
 @dp.message()
-async def on_process_message(message: Message):
+async def on_process_message(message: Message, state: FSMContext):
     if message and message.text:
         for key in link_types:
             if link_types[key].search(message.text):
-                await download(message, key)
+                USER_DATA[message.from_user.id] = message
+                kbd = InlineKeyboardBuilder()
+                text_and_data = [ buttons[btn] for btn in buttons if btn in options[key] ] + [('❌', 'exit')]
+                row_btns = (InlineKeyboardButton(text = text, callback_data = data) for text, data in text_and_data)
+                kbd.row(*row_btns)
+                await message.answer(text="Может качнем эту ☝ ссылку?", reply_markup = kbd.as_markup())
+                await state.set_state(TuneLoaderStates.select_action)
+
+@dp.channel_post()
+async def on_process_channel_post(message: Message):
+    if message and message.text:
+        for key in link_types:
+            if link_types[key].search(message.text):
+                await download(message, False)
 
 ##############################################################
 async def main():

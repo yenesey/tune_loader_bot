@@ -35,7 +35,7 @@ YTDL_OPTS = {
     # "verbose": True
 }
 
-async def download_url(work_dir, url, video = False) -> dict:
+async def download(work_dir, url, video = False) -> dict:
     result = None
 
     def postproc(d):

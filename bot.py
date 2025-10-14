@@ -23,12 +23,13 @@ from aiogram.types import (
     InputMediaVideo,
     BotCommand,
     CallbackQuery,
+    ReplyKeyboardMarkup,
     InlineKeyboardButton,
 )
 from aiogram.utils.markdown import hlink
 from aiogram.client.default import DefaultBotProperties
 ######################################################################
-from download import download_url
+from download import download
 from settings import SETTINGS
 from database import Database
 ######################################################################
@@ -88,14 +89,14 @@ async def process_message(message: Message, video: bool):
             on_date = datetime.now()
             target_dir = get_download_dir(on_date)
             ensure_directory_exists(target_dir)
-            download = await download_url(target_dir, url, video)
+            loaded = await download(target_dir, url, video)
 
-            if download:
-                file_name_path = os.path.join(target_dir, download["file_name"])
+            if loaded:
+                file_name_path = os.path.join(target_dir, loaded["file_name"])
                 user_id = str(message.from_user.id) if message.from_user else None
-                await DB.save(on_date, user_id, url, video, download["file_name"], download["file_size"], download["title"])
+                await DB.save(on_date, user_id, url, video, loaded["file_name"], loaded["file_size"], loaded["title"])
     
-        result = found or download
+        result = found or loaded
 
         if result:
             title = result["title"]
@@ -121,28 +122,42 @@ async def process_message(message: Message, video: bool):
 
 
 ##############################################################
-link_types = {
-    "youtube": re.compile(r'^https://(?:www.)?(?:music.)?youtu(?:.be/|be.com/)?'),
-    "soundcloud": re.compile(r'^https://(m|on)?.?soundcloud'),
-    "yandex": re.compile(r'^https?://music\.yandex\.(?P<tld>ru|kz|ua|by|com)'),
-    "rutube": re.compile(r'^https?://rutube\.ru/(?:(?:live/)?video(?:/private)?|(?:play/)?embed)/(?P<id>[\da-z]{32})'),
-    "coub" :  re.compile(r'^(?:coub:|https?://(?:coub\.com/(?:view|embed|coubs)/|c-cdn\.coub\.com/fb-player\.swf\?.*\bcoub(?:ID|id)=))(?P<id>[\da-z]+)'),
-    "tiktok": re.compile(r'^https://(?:www.)?(?:vt.)?tiktok.com/'),
-}
+def check_url(url):
+    supported_urls = {
+        "youtube": re.compile(r'^https://(?:www.)?(?:music.)?youtu(?:.be/|be.com/)?'),
+        "soundcloud": re.compile(r'^https://(m|on)?.?soundcloud'),
+        "yandex": re.compile(r'^https?://music\.yandex\.(?P<tld>ru|kz|ua|by|com)'),
+        "rutube": re.compile(r'^https?://rutube\.ru/(?:(?:live/)?video(?:/private)?|(?:play/)?embed)/(?P<id>[\da-z]{32})'),
+        "coub" :  re.compile(r'^(?:coub:|https?://(?:coub\.com/(?:view|embed|coubs)/|c-cdn\.coub\.com/fb-player\.swf\?.*\bcoub(?:ID|id)=))(?P<id>[\da-z]+)'),
+        "tiktok": re.compile(r'^https://(?:www.)?(?:vt.)?tiktok.com/'),
+    }
+    for key in supported_urls:
+        if supported_urls[key].search(url):
+            return key
+    return None
 
-options = {
-    "youtube": ("audio", "video"),
-    "soundcloud": ("audio"),
-    "yandex": ("audio"), 
-    "rutube": ("audio"),
-    "coub" : ("audio", "video"),
-    "tiktok": ("video"),
-}
 
-buttons = {
-    "audio": ('🎶Audio', 'audio'),
-    "video": ('🎞Video', 'video'),
-}
+def create_download_dialog(key) -> dict:
+    options = {
+        "youtube": ("audio", "video"),
+        "soundcloud": ("audio"),
+        "yandex": ("audio"), 
+        "rutube": ("audio"),
+        "coub" : ("audio", "video"),
+        "tiktok": ("video"),
+    }
+
+    buttons = {
+        "audio": ('🎶Audio', 'audio'),
+        "video": ('🎞Video', 'video'),
+    }
+
+    kbd = InlineKeyboardBuilder()
+    text_and_data = [ buttons[btn] for btn in buttons if btn in options[key] ] + [('❌', 'exit')]
+    row_btns = (InlineKeyboardButton(text = text, callback_data = data) for text, data in text_and_data)
+    kbd.row(*row_btns)
+    return {"text": "Может качнем эту ☝ ссылку?", "reply_markup": kbd.as_markup() }
+
 
 dp = Dispatcher()
 
@@ -157,22 +172,17 @@ async def inline_kb_answer_callback_handler(query: CallbackQuery, state: FSMCont
 @dp.message()
 async def on_process_message(message: Message, state: FSMContext):
     if message and message.text:
-        for key in link_types:
-            if link_types[key].search(message.text):
-                USER_DATA[message.from_user.id] = message
-                kbd = InlineKeyboardBuilder()
-                text_and_data = [ buttons[btn] for btn in buttons if btn in options[key] ] + [('❌', 'exit')]
-                row_btns = (InlineKeyboardButton(text = text, callback_data = data) for text, data in text_and_data)
-                kbd.row(*row_btns)
-                await message.answer(text="Может качнем эту ☝ ссылку?", reply_markup = kbd.as_markup())
-                await state.set_state(TuneLoaderStates.select_action)
+        url_type = check_url(message.text)
+        if url_type:
+            USER_DATA[message.from_user.id] = message
+            await message.answer(**create_download_dialog(url_type))
+            await state.set_state(TuneLoaderStates.select_action)
 
 @dp.channel_post()
 async def on_process_channel_post(message: Message):
     if message and message.text:
-        for key in link_types:
-            if link_types[key].search(message.text):
-                await process_message(message, False)
+        if check_url(message.text):
+            await process_message(message, False)
 
 ##############################################################
 async def main():

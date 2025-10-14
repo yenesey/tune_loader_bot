@@ -90,7 +90,7 @@ async def find_or_download(url: str, user_id: str, video: bool) -> dict:
 async def process_message(message: Message, video: bool):
     url = message.text
     logging.info("Received URL: " + url)
-    InputMedia = InputMediaAudio if video else InputMediaVideo
+    InputMedia = InputMediaVideo if video else InputMediaAudio
     try:
         instant_answer = await message.answer("Processing. Please wait for a while...")
         user_id = str(message.from_user.id) if message.from_user else None

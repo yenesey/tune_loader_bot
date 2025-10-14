@@ -69,39 +69,32 @@ def ensure_directory_exists(target_dir):
     if not os.path.isdir(target_dir):
         os.makedirs(target_dir)
 
-async def find_or_download(message, video) -> dict:
-    url = message.text
+async def find_or_download(url: str, user_id: str, video: bool) -> dict:
     found = await DB.find_url(url, video)
     if found:
         on_date = found["date"]
         target_dir = get_download_dir(on_date)
-        file_name_path = os.path.join(target_dir, found["file_name"])
     else:
         on_date = datetime.now()
         target_dir = get_download_dir(on_date)
         ensure_directory_exists(target_dir)
         loaded = await download(target_dir, url, video)
         if loaded:
-            file_name_path = os.path.join(target_dir, loaded["file_name"])
-            user_id = str(message.from_user.id) if message.from_user else None
             await DB.save(on_date, user_id, url, video, loaded["file_name"], loaded["file_size"], loaded["title"])
     result = found or loaded
     if result:
         result["on_date"] = on_date
-        result["file_name_path"] = file_name_path
+        result["complete_file_name"] = os.path.join(target_dir, loaded["file_name"])
     return result
 
 async def process_message(message: Message, video: bool):
     url = message.text
-    InputMedia = InputMediaAudio
-    if video:
-        InputMedia = InputMediaVideo
-
     logging.info("Received URL: " + url)
-
+    InputMedia = InputMediaAudio if video else InputMediaVideo
     try:
         instant_answer = await message.answer("Processing. Please wait for a while...")
-        result = await find_or_download(message, video)
+        user_id = str(message.from_user.id) if message.from_user else None
+        result = await find_or_download(url, user_id, video)
         if result:
             title = result["title"]
             split = title.split(SETTINGS["name-sep"])
@@ -110,7 +103,7 @@ async def process_message(message: Message, video: bool):
             server_url = get_server_url(result["on_date"], result["file_name"])
             if result["file_size"] < 50*1024*1024:
                 await instant_answer.edit_media(
-                    InputMedia(media = FSInputFile(result["file_name_path"]), title = title2, performer = artist,
+                    InputMedia(media = FSInputFile(result["complete_file_name"]), title = title2, performer = artist,
                         caption = hlink("#origin", url) + "  " + hlink("#file", server_url))
                 )
             else:

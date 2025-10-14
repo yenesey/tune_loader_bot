@@ -1,14 +1,12 @@
 #!/usr/bin/python3
 import logging
 import asyncio
-import aiosqlite
 import traceback
-import json
 import os
 import urllib.parse
 import re
 from datetime import datetime
-import copy
+
 from typing import Any, Callable, Dict, Awaitable
 
 from aiogram.filters import Command, CommandStart, StateFilter
@@ -30,95 +28,16 @@ from aiogram.types import (
 from aiogram.utils.markdown import hlink
 from aiogram.client.default import DefaultBotProperties
 ######################################################################
-from yt_dlp import YoutubeDL
-from yt_dlp.utils import DownloadError
+from download import download_url
+from settings import SETTINGS
+from database import Database
 ######################################################################
-'''
-Example SETTINGS:
-{
-    "telegram-api-token" : "***",
-    "po-token-gvs": "***",
-    "po-token-web": "***",
-    "download-dir": "/var/www/***",
-    "server-root-url": "https://server/mp3",
-    "users-list": [],
-}
-'''
-SETTINGS = json.load( open('settings.json') )
-NAME_SEP = "—"
-# NAME_SEP = "-"
-
-YTDL_OPTS = {
-    "paths": {"temp" : SETTINGS["download-dir"], "home": SETTINGS["download-dir"]},
-    "extractor_args": {
-        "player_client" : "web",
-        "youtube" : {"po_token" : [f'web.gvs+{SETTINGS["po-token-gvs"]}', f'web.player+{SETTINGS["po-token-web"]}' ]}
-    },
-    "cookiefile" : os.path.join(os.getcwd(), "cookies.txt"),
-    "postprocessors": [{
-        "key": "FFmpegExtractAudio",
-        "preferredcodec": "mp3",
-        "preferredquality": "192",
-    },
-    {
-        "key": "FFmpegVideoConvertor", 
-        "preferedformat": "mp4"
-    }],
-    # "postprocessor_args": {
-        # "videoconvertor": ["-c:v", "libx264", "-preset",  "fast", "-crf", "23", "-c:a", "aac", "-b:a" "128k"]
-    # },
-    "format": "bestvideo*+bestaudio/best",
-    # "outtmpl": f"%(channel)s{NAME_SEP}%(artist)s{NAME_SEP}%(title).100s",
-    "outtmpl": f"%(title).100s",
-    "outtmpl_na_placeholder": "",
-    "progress_hooks": [],
-    "postprocessor_hooks": [],
-    "overwrites": True,
-    # "verbose": True
-}
-
 USER_DATA = {}
-
+DB = None
 
 class TuneLoaderStates(StatesGroup):
     select_action = State()
 
-
-class Database:
-    _instance = None
-    def __new__(self, *args, **kwargs):
-        if self._instance is None:
-            self._instance = super().__new__(self, *args, **kwargs)
-        return self._instance
-    
-    @classmethod
-    async def create(cls):
-        # if not os.path.isfile("downloads.db"):
-        conn = await aiosqlite.connect("downloads.db")
-        await conn.execute("CREATE TABLE IF NOT EXISTS downloads (date DATETIME, user_id STRING, url STRING, video BOOLEAN, file_name STRING, file_size BIGINT, title STRING)")
-        await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS url_and_type ON downloads (url, video)")
-        await conn.commit()
-        inst = cls()
-        inst._conn = conn
-        return inst
-
-    async def find_url(self, url, video = False):
-        cursor = await self._conn.execute("SELECT date, file_name, file_size, title FROM downloads WHERE url = ? and video = ?", [url, int(video)])
-        fetch_data = await cursor.fetchone()
-        return {
-            "date" : datetime.strptime(fetch_data[0][:10], "%Y-%m-%d").date(),
-            "file_name" : fetch_data[1],
-            "file_size" : fetch_data[2],
-            "title" : fetch_data[3],
-        } if fetch_data else None
-
-    async def save(self, on_date, user_id, url, video, file_name, file_size, title):
-        await self._conn.execute("INSERT INTO downloads(date, user_id, url, video, file_name, file_size, title) VALUES(?, ?, ?, ?, ?, ?, ?)",
-            [on_date, user_id, url, video, file_name, file_size, title]
-        )
-        await self._conn.commit()
-
-DB = None
 
 ######################################################################
 class SecurityMiddleware(BaseMiddleware):
@@ -136,52 +55,6 @@ class SecurityMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 ##############################################################
-async def download_yt_dlp(work_dir, url, video = False) -> dict:
-    result = None
-
-    def postproc(d):
-        nonlocal result
-        file_types = {
-            "ExtractAudio" : ".mp3",
-            "VideoConvertor": ".mp4",
-        }
-        if not result:
-            pp = d["postprocessor"]
-            if pp in ("ExtractAudio", "VideoConvertor"):
-                if d["status"] == "finished":
-                    # logging.info(d["info_dict"])
-                    filename = os.path.basename(d["info_dict"]["filename"])
-                    title = NAME_SEP.join([d["info_dict"][key] for key in ("channel", "artist", "title") if key in d["info_dict"]])
-                    result = {
-                        "file_ext" : file_types[pp],
-                        "file_name" : filename,
-                        "title" : title,
-                    }
-                    logging.info(f'{pp}: {filename}')
-
-    opts = copy.deepcopy(YTDL_OPTS)
-    opts["logger"] = logging
-    opts["paths"]["home"] = work_dir
-    opts["postprocessor_hooks"] = [postproc]
-    del opts["postprocessors"][int(not video)] # remove unwanted postprocessor from copy
-
-    try:
-        with YoutubeDL(opts) as ydl:
-            logging.info(f'Schedule download: {url}')
-            await asyncio.to_thread(ydl.download, [url])
-            if result:
-                if not os.path.exists(os.path.join(work_dir, result["file_name"])):
-                    if os.path.exists(os.path.join(work_dir, result["file_name"] + result["file_ext"])):
-                        result["file_name"] = result["file_name"] + result["file_ext"]           
-                    else:
-                        logging.ERROR("something wrong with file name")
-                result["file_size"] = os.path.getsize(os.path.join(work_dir, result["file_name"]))
-
-    except DownloadError as e:
-        logging.ERROR(f'Error downloading: {url}: {str(e)}')
-    return result
-
-
 def sub_dir(on_date: datetime):
     return os.path.join(str(on_date.year), f'{str(on_date.year)}-{str(on_date.month).zfill(2)}')
 
@@ -195,7 +68,7 @@ def ensure_directory_exists(target_dir):
     if not os.path.isdir(target_dir):
         os.makedirs(target_dir)
 
-async def download(message: Message, video: bool):
+async def process_message(message: Message, video: bool):
     url = message.text
     InputMedia = InputMediaAudio
     if video:
@@ -215,7 +88,7 @@ async def download(message: Message, video: bool):
             on_date = datetime.now()
             target_dir = get_download_dir(on_date)
             ensure_directory_exists(target_dir)
-            download = await download_yt_dlp(target_dir, url, video)
+            download = await download_url(target_dir, url, video)
 
             if download:
                 file_name_path = os.path.join(target_dir, download["file_name"])
@@ -226,7 +99,7 @@ async def download(message: Message, video: bool):
 
         if result:
             title = result["title"]
-            split = title.split(NAME_SEP)
+            split = title.split(SETTINGS["name-sep"])
             artist = split[len(split)-2]
             title2 = split[len(split)-1]
 
@@ -278,7 +151,7 @@ async def inline_kb_answer_callback_handler(query: CallbackQuery, state: FSMCont
     await query.answer()
     await query.bot.delete_message(chat_id = query.message.chat.id, message_id = query.message.message_id)
     if query.data != 'exit':
-        await download(USER_DATA[query.from_user.id], query.data == 'video')
+        await process_message(USER_DATA[query.from_user.id], query.data == 'video')
     await state.clear()
  
 @dp.message()
@@ -299,7 +172,7 @@ async def on_process_channel_post(message: Message):
     if message and message.text:
         for key in link_types:
             if link_types[key].search(message.text):
-                await download(message, False)
+                await process_message(message, False)
 
 ##############################################################
 async def main():

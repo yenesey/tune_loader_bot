@@ -1,3 +1,4 @@
-settings.json
+__pycache__
+settings.json*
 downloads.db
 cookies.txt

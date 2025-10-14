@@ -11,6 +11,8 @@ from datetime import datetime
 import copy
 from typing import Any, Callable, Dict, Awaitable
 
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 from aiogram import Bot, Dispatcher #, Router
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
 from aiogram.types import (
@@ -20,6 +22,7 @@ from aiogram.types import (
     InputMediaAudio,
     InputMediaVideo,
     BotCommand,
+    InlineKeyboardButton,
 )
 from aiogram.utils.markdown import hlink
 from aiogram.client.default import DefaultBotProperties
@@ -39,7 +42,8 @@ Example SETTINGS:
 }
 '''
 SETTINGS = json.load( open('settings.json') )
-NAME_DELIMITER = "—"
+NAME_SEP = "—"
+# NAME_SEP = "-"
 
 YTDL_OPTS = {
     "paths": {"temp" : SETTINGS["download-dir"], "home": SETTINGS["download-dir"]},
@@ -61,14 +65,19 @@ YTDL_OPTS = {
         # "videoconvertor": ["-c:v", "libx264", "-preset",  "fast", "-crf", "23", "-c:a", "aac", "-b:a" "128k"]
     # },
     "format": "bestvideo*+bestaudio/best",
-    # "outtmpl": f"%(channel)s{NAME_DELIMITER}%(artist)s{NAME_DELIMITER}%(title).50s.%(ext)s",
-    "outtmpl": f"%(id)s",
+    # "outtmpl": f"%(channel)s{NAME_SEP}%(artist)s{NAME_SEP}%(title).100s",
+    "outtmpl": f"%(title).100s",
     "outtmpl_na_placeholder": "",
     "progress_hooks": [],
     "postprocessor_hooks": [],
     "overwrites": True,
     # "verbose": True
 }
+
+class TuneLoaderStates(StatesGroup):
+    select_action = State()
+    execute_action = State()
+
 
 class Database:
     _instance = None
@@ -100,7 +109,7 @@ class Database:
 
     async def save(self, on_date, user_id, url, video, file_name, file_size, title):
         await self._conn.execute("INSERT INTO downloads(date, user_id, url, video, file_name, file_size, title) VALUES(?, ?, ?, ?, ?, ?, ?)",
-            [on_date, user_id, url, video, file_name, file_size]
+            [on_date, user_id, url, video, file_name, file_size, title]
         )
         await self._conn.commit()
 
@@ -135,12 +144,13 @@ async def download_yt_dlp(work_dir, url, video = False) -> dict:
             pp = d["postprocessor"]
             if pp in ("ExtractAudio", "VideoConvertor"):
                 if d["status"] == "finished":
-                    filename = d["info_dict"]["filename"]
-                    filename = filename[:filename.rfind(".")] + file_types[pp]
-                    result = { 
-                        "file_name" : os.path.basename(filename),
-                        "file_size" : os.path.getsize(filename),
-                        "title" : d["info_dict"]["title"],
+                    # logging.info(d["info_dict"])
+                    filename = os.path.basename(d["info_dict"]["filename"])
+                    title = NAME_SEP.join([d["info_dict"][key] for key in ("channel", "artist", "title") if key in d["info_dict"]])
+                    result = {
+                        "file_ext" : file_types[pp],
+                        "file_name" : filename,
+                        "title" : title,
                     }
                     logging.info(f'{pp}: {filename}')
 
@@ -152,27 +162,20 @@ async def download_yt_dlp(work_dir, url, video = False) -> dict:
 
     try:
         with YoutubeDL(opts) as ydl:
-            logging.info(f'Schedule download: {url}' )
+            logging.info(f'Schedule download: {url}')
             await asyncio.to_thread(ydl.download, [url])
+            if result:
+                if not os.path.exists(os.path.join(work_dir, result["file_name"])):
+                    if os.path.exists(os.path.join(work_dir, result["file_name"] + result["file_ext"])):
+                        result["file_name"] = result["file_name"] + result["file_ext"]           
+                    else:
+                        logging.ERROR("something wrong with file name")
+                result["file_size"] = os.path.getsize(os.path.join(work_dir, result["file_name"]))
+
     except DownloadError as e:
-        print(f'Error downloading: {url}: {str(e)}')
+        logging.ERROR(f'Error downloading: {url}: {str(e)}')
     return result
 
-def artist_title(file_name) -> (str, str):
-    '''
-    extract <artist> and <title> from file name
-    '''
-    name_parts = [name.strip() for name in file_name.split(NAME_DELIMITER) if name != ""]
-    title = ""
-    artist = ""
-    if len(name_parts) == 0:
-       raise Exception(f'something wrong with name parts:{file_name}')
-    elif len(name_parts) == 1:
-        title = name_parts[0][:-4]
-    else:
-        artist,title = name_parts[-2:]
-        title = title[:-4] # cut off ".mp3"
-    return artist, title
 
 def sub_dir(on_date: datetime):
     return os.path.join(str(on_date.year), f'{str(on_date.year)}-{str(on_date.month).zfill(2)}')
@@ -228,15 +231,19 @@ async def download(message: Message, key: str):
         result = found or download
 
         if result:
-            artist, title = artist_title(result["title"])
+            title = result["title"]
+            split = title.split(NAME_SEP)
+            artist = split[len(split)-2]
+            title2 = split[len(split)-1]
+
             server_url = get_server_url(on_date, result["file_name"])
-            if file_size < 50*1024*1024:
+            if result["file_size"] < 50*1024*1024:
                 await instant_answer.edit_media(
-                    InputMedia(media = FSInputFile(file_name_path), title = title, performer = artist,
+                    InputMedia(media = FSInputFile(file_name_path), title = title2, performer = artist,
                         caption = hlink("#origin", url) + "  " + hlink("#file", server_url))
                 )
             else:
-                await instant_answer.edit_text(hlink(f"{artist} - {title}", server_url) + "\n" + hlink("#origin", url))
+                await instant_answer.edit_text(hlink(f"{title}", server_url) + "\n" + hlink("#origin", url))
             await message.delete()
         else:
             await message.answer("Something went wrong...")
@@ -258,6 +265,7 @@ link_types = {
 }
 
 dp = Dispatcher()
+
 
 @dp.channel_post()
 @dp.message()

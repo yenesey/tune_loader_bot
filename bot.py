@@ -69,6 +69,28 @@ def ensure_directory_exists(target_dir):
     if not os.path.isdir(target_dir):
         os.makedirs(target_dir)
 
+async def find_or_download(message, video) -> dict:
+    url = message.text
+    found = await DB.find_url(url, video)
+    if found:
+        on_date = found["date"]
+        target_dir = get_download_dir(on_date)
+        file_name_path = os.path.join(target_dir, found["file_name"])
+    else:
+        on_date = datetime.now()
+        target_dir = get_download_dir(on_date)
+        ensure_directory_exists(target_dir)
+        loaded = await download(target_dir, url, video)
+        if loaded:
+            file_name_path = os.path.join(target_dir, loaded["file_name"])
+            user_id = str(message.from_user.id) if message.from_user else None
+            await DB.save(on_date, user_id, url, video, loaded["file_name"], loaded["file_size"], loaded["title"])
+    result = found or loaded
+    if result:
+        result["on_date"] = on_date
+        result["file_name_path"] = file_name_path
+    return result
+
 async def process_message(message: Message, video: bool):
     url = message.text
     InputMedia = InputMediaAudio
@@ -79,35 +101,16 @@ async def process_message(message: Message, video: bool):
 
     try:
         instant_answer = await message.answer("Processing. Please wait for a while...")
-        file_name_path = ""
-        found = await DB.find_url(url, video)
-        if found:
-            on_date = found["date"]
-            target_dir = get_download_dir(on_date)
-            file_name_path = os.path.join(target_dir, found["file_name"])
-        else:
-            on_date = datetime.now()
-            target_dir = get_download_dir(on_date)
-            ensure_directory_exists(target_dir)
-            loaded = await download(target_dir, url, video)
-
-            if loaded:
-                file_name_path = os.path.join(target_dir, loaded["file_name"])
-                user_id = str(message.from_user.id) if message.from_user else None
-                await DB.save(on_date, user_id, url, video, loaded["file_name"], loaded["file_size"], loaded["title"])
-    
-        result = found or loaded
-
+        result = await find_or_download(message, video)
         if result:
             title = result["title"]
             split = title.split(SETTINGS["name-sep"])
             artist = split[len(split)-2]
             title2 = split[len(split)-1]
-
-            server_url = get_server_url(on_date, result["file_name"])
+            server_url = get_server_url(result["on_date"], result["file_name"])
             if result["file_size"] < 50*1024*1024:
                 await instant_answer.edit_media(
-                    InputMedia(media = FSInputFile(file_name_path), title = title2, performer = artist,
+                    InputMedia(media = FSInputFile(result["file_name_path"]), title = title2, performer = artist,
                         caption = hlink("#origin", url) + "  " + hlink("#file", server_url))
                 )
             else:

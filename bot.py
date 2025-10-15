@@ -84,7 +84,7 @@ async def find_or_download(url: str, user_id: str, video: bool) -> dict:
     result = found or loaded
     if result:
         result["on_date"] = on_date
-        result["complete_file_name"] = os.path.join(target_dir, loaded["file_name"])
+        result["complete_file_name"] = os.path.join(target_dir, result["file_name"])
     return result
 
 async def process_message(message: Message, video: bool):
@@ -145,7 +145,7 @@ def create_download_dialog(key) -> dict:
 
     buttons = {
         "audio": ('🎶Audio', 'audio'),
-        "video": ('🎞Video', 'video'),
+        "video": ('📺Video', 'video'),
     }
 
     kbd = InlineKeyboardBuilder()

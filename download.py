@@ -19,15 +19,7 @@ YTDL_OPTS = {
     },
     "js_runtimes" : {"deno": {"path": "/home/denis/.deno/bin/deno"}},
     "cookiefile" : os.path.join(os.getcwd(), "cookies.txt"),
-    "postprocessors": [{
-        "key": "FFmpegExtractAudio",
-        "preferredcodec": "mp3",
-        "preferredquality": "192",
-    },
-    {
-        "key": "FFmpegVideoConvertor", 
-        "preferedformat": "mp4"
-    }],
+    "postprocessors": [],
     # "postprocessor_args": {
         # "videoconvertor": ["-c:v", "libx264", "-preset",  "fast", "-crf", "23", "-c:a", "aac", "-b:a" "128k"]
     # },
@@ -40,46 +32,48 @@ YTDL_OPTS = {
     # "verbose": True
 }
 
-async def download(work_dir, url, video = False) -> dict:
+async def download(target_dir, url, video = False) -> dict:
     result = None
+    postproc_status = {}
 
     def postproc(d):
         nonlocal result
-        file_types = {
-            "ExtractAudio" : ".mp3",
-            "VideoConvertor": ".mp4",
-        }
+        nonlocal postproc_status
+        info = d["info_dict"]
+        pp = d["postprocessor"]
+        status = d["status"]
+        if not (pp in postproc_status and status == postproc_status[pp]):
+            logging.info(pp + ":" + status  + ":" + info.get("title")  )
+        postproc_status[pp] = status  
         if not result:
-            pp = d["postprocessor"]
-            if pp in ("ExtractAudio", "VideoConvertor"):
-                if d["status"] == "finished":
-                    # logging.info(d["info_dict"])
-                    filename = os.path.basename(d["info_dict"]["filename"])
-                    title = SETTINGS["name-sep"].join([d["info_dict"][key] for key in ("channel", "artist", "title") if key in d["info_dict"]])
-                    result = {
-                        "file_ext" : file_types[pp],
-                        "file_name" : filename,
-                        "title" : title,
-                    }
-                    logging.info(f'{pp}: {filename}')
+            if (pp == "MoveFiles") and (status == "finished"):
+                filename = os.path.basename(info.get("filepath"))
+                title = SETTINGS["name-sep"].join([info[key] for key in ("channel", "artist", "title") if key in info])
+                result = {
+                    "title" : title,
+                    "file_name" : filename,
+                    "file_size": os.path.getsize(os.path.join(target_dir, filename))
+                }
+                logging.info(result)
 
     opts = copy.deepcopy(YTDL_OPTS)
     opts["logger"] = logging
-    opts["paths"]["home"] = work_dir
+    opts["paths"]["home"] = target_dir
     opts["postprocessor_hooks"] = [postproc]
-    del opts["postprocessors"][int(not video)] # remove unwanted postprocessor from copy
+    opts["postprocessors"].append({
+            "key": "FFmpegVideoConvertor", 
+            "preferedformat": "mp4"
+        } if video else {
+            "key": "FFmpegExtractAudio",
+            "preferredcodec": "mp3",
+            "preferredquality": "192",
+        }
+    )
 
     try:
         with YoutubeDL(opts) as ydl:
             logging.info(f'Schedule download: {url}')
             await asyncio.to_thread(ydl.download, [url])
-            if result:
-                if not os.path.exists(os.path.join(work_dir, result["file_name"])):
-                    if os.path.exists(os.path.join(work_dir, result["file_name"] + result["file_ext"])):
-                        result["file_name"] = result["file_name"] + result["file_ext"]           
-                    else:
-                        logging.ERROR("something wrong with file name")
-                result["file_size"] = os.path.getsize(os.path.join(work_dir, result["file_name"]))
 
     except DownloadError as e:
         logging.ERROR(f'Error downloading: {url}: {str(e)}')

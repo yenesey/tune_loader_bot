@@ -11,8 +11,13 @@ YTDL_OPTS = {
     "paths": {"temp" : SETTINGS["download-dir"], "home": SETTINGS["download-dir"]},
     "extractor_args": {
         "player_client" : "web",
-        "youtube" : {"po_token" : [f'web.gvs+{SETTINGS["po-token-gvs"]}', f'web.player+{SETTINGS["po-token-web"]}' ]}
+        "youtube" : {
+            "po_token" : [f'web.gvs+{SETTINGS["po-token-gvs"]}', f'web.player+{SETTINGS["po-token-web"]}' ],
+            "youtube_player_js_version": "actual",
+            "youtube_player_js_variant": "main",
+        }
     },
+    "js_runtimes" : {"deno": {"path": "/home/denis/.deno/bin/deno"}},
     "cookiefile" : os.path.join(os.getcwd(), "cookies.txt"),
     "postprocessors": [{
         "key": "FFmpegExtractAudio",

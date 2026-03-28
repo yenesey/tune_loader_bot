@@ -5,7 +5,8 @@ import traceback
 import os
 import urllib.parse
 import re
-from datetime import datetime
+import json
+from datetime import datetime, timedelta
 
 from typing import Any, Callable, Dict, Awaitable
 
@@ -29,14 +30,19 @@ from aiogram.types import (
 from aiogram.utils.markdown import hlink
 from aiogram.client.default import DefaultBotProperties
 ######################################################################
-from download import download
+from download import download_media, download_playlist
+# from watchdog import watchdog
 from settings import SETTINGS
 from database import Database
 ######################################################################
 USER_DATA = {}
 DB = None
+TG_MAX_FILE_SIZE = 50*1024*1024
+######################################################################
+class DownloadActions(StatesGroup):
+    select_action = State()
 
-class TuneLoaderStates(StatesGroup):
+class WatchdogActions(StatesGroup):
     select_action = State()
 
 
@@ -51,41 +57,45 @@ class SecurityMiddleware(BaseMiddleware):
         if "event_from_user" in data:
             user = data["event_from_user"]
             if (user.id not in SETTINGS["users-list"]):
-                logging.info(f'Unknown user: {str(user.id)}')
+                logging.info(f"Unknown user: {str(user.id)}")
+                logging.info(f"message.text: {data.keys()}")
                 return   
         return await handler(event, data)
 
 ##############################################################
 def sub_dir(on_date: datetime):
-    return os.path.join(str(on_date.year), f'{str(on_date.year)}-{str(on_date.month).zfill(2)}')
+    return os.path.join(str(on_date.year), f"{str(on_date.year)}-{str(on_date.month).zfill(2)}")
 
-def get_server_url(on_date: datetime, file_name : str) -> str:
-    return f'{SETTINGS["server-root-url"]}/{sub_dir(on_date)}/{urllib.parse.quote(file_name)}'
-       
-def get_download_dir(on_date: datetime) -> str:
-    return f'{SETTINGS["download-dir"]}/{sub_dir(on_date)}'      
-       
-def ensure_directory_exists(target_dir):
-    if not os.path.isdir(target_dir):
-        os.makedirs(target_dir)
+def enrich_info(info):
+    if not info or not isinstance(info, dict):
+        return None
+    info["performer"] = info["artist"] or info["channel"]
+    info["link_text"] = info["performer"] + " - " + info["title"] if info["performer"] else info["title"]
+    info["server_url"] = f'{SETTINGS["server-root-url"]}/{sub_dir(info["date"])}/{urllib.parse.quote(info["file_name"])}'
+    if not 'file_path' in info:
+        info['file_path'] = os.path.join(f'{SETTINGS["download-dir"]}/{sub_dir(info["date"])}', info['file_name'])
+    return info
 
-async def find_or_download(url: str, user_id: str, video: bool) -> dict:
+async def find(url: str, video: bool) -> dict:
     found = await DB.find_url(url, video)
     if found:
-        on_date = found["date"]
-        target_dir = get_download_dir(on_date)
-    else:
-        on_date = datetime.now()
-        target_dir = get_download_dir(on_date)
-        ensure_directory_exists(target_dir)
-        loaded = await download(target_dir, url, video)
-        if loaded:
-            await DB.save(on_date, user_id, url, video, loaded["file_name"], loaded["file_size"], loaded["title"])
-    result = found or loaded
-    if result:
-        result["on_date"] = on_date
-        result["complete_file_name"] = os.path.join(target_dir, result["file_name"])
-    return result
+        return enrich_info(found)
+
+async def download(url: str, video: bool, user_id: str) -> dict:
+    date = datetime.now()
+    target_dir = f'{SETTINGS["download-dir"]}/{sub_dir(date)}'
+    if not os.path.isdir(target_dir):
+        os.makedirs(target_dir)
+    loaded = await download_media(target_dir, url, video)
+    if loaded:
+        loaded["date"] = date
+        loaded["user_id"] = user_id
+        loaded["url"] = url
+        loaded["video"] = int(video) 
+        loaded["delivered"] = int(False)
+        await DB.save_download(loaded)
+        enrich_info(loaded)
+    return loaded
 
 async def process_message(message: Message, video: bool):
     url = message.text
@@ -93,20 +103,19 @@ async def process_message(message: Message, video: bool):
     try:
         instant_answer = await message.answer("Processing. Please wait for a while...")
         user_id = str(message.from_user.id) if message.from_user else None
-        result = await find_or_download(url, user_id, video)
+        result = await find(url, video)
+        if not result:
+            result = await download(url, video, user_id)
         if result:
-            title = result["title"]
-            split = title.split(SETTINGS["name-sep"])
-            artist = split[len(split)-2]
-            title2 = split[len(split)-1]
-            server_url = get_server_url(result["on_date"], result["file_name"])
-            if result["file_size"] < 50*1024*1024:
+            if result["file_size"] < TG_MAX_FILE_SIZE:
                 await instant_answer.edit_media(
-                    InputMedia(media = FSInputFile(result["complete_file_name"]), title = title2, performer = artist,
-                        caption = hlink("#origin", url) + "  " + hlink("#file", server_url))
+                    InputMedia(media = FSInputFile(result["file_path"]),
+                        title = result["title"],
+                        performer = result["performer"],
+                        caption = hlink("#origin", url) + "  " + hlink("#file", result["server_url"]))
                 )
             else:
-                await instant_answer.edit_text(hlink(f"{title}", server_url) + "\n" + hlink("#origin", url))
+                await instant_answer.edit_text(hlink(result["link_text"], result["server_url"]) + "\n" + hlink("#origin", url))
             await message.delete()
         else:
             await message.answer("Something went wrong...")
@@ -119,13 +128,13 @@ async def process_message(message: Message, video: bool):
 ##############################################################
 def check_url(url):
     supported_urls = {
-        "youtube": re.compile(r'^https://(?:www.)?(?:music.)?youtu(?:.be/|be.com/)?'),
-        "soundcloud": re.compile(r'^https://(m|on)?.?soundcloud'),
-        "yandex": re.compile(r'^https?://music\.yandex\.(?P<tld>ru|kz|ua|by|com)'),
-        "rutube": re.compile(r'^https?://rutube\.ru/(?:(?:live/)?video(?:/private)?|(?:play/)?embed)/(?P<id>[\da-z]{32})'),
-        "coub" :  re.compile(r'^(?:coub:|https?://(?:coub\.com/(?:view|embed|coubs)/|c-cdn\.coub\.com/fb-player\.swf\?.*\bcoub(?:ID|id)=))(?P<id>[\da-z]+)'),
-        "tiktok": re.compile(r'^https://(?:www.)?(?:vt.)?tiktok.com/'),
-        "instagram": re.compile(r'(?P<url>https?://(?:www\.)?instagram\.com(?:/(?!share/)[^/?#]+)?/(?:p|tv|reels?(?!/audio/))/(?P<id>[^/?#&]+))'),
+        "youtube": re.compile(r"^https://(?:www.)?(?:music.)?youtu(?:.be/|be.com/)?"),
+        "soundcloud": re.compile(r"^https://(m|on)?.?soundcloud"),
+        "yandex": re.compile(r"^https?://music\.yandex\.(?P<tld>ru|kz|ua|by|com)"),
+        "rutube": re.compile(r"^https?://rutube\.ru/(?:(?:live/)?video(?:/private)?|(?:play/)?embed)/(?P<id>[\da-z]{32})"),
+        "coub" :  re.compile(r"^(?:coub:|https?://(?:coub\.com/(?:view|embed|coubs)/|c-cdn\.coub\.com/fb-player\.swf\?.*\bcoub(?:ID|id)=))(?P<id>[\da-z]+)"),
+        "tiktok": re.compile(r"^https://(?:www.)?(?:vt.)?tiktok.com/"),
+        "instagram": re.compile(r"(?P<url>https?://(?:www\.)?instagram\.com(?:/(?!share/)[^/?#]+)?/(?:p|tv|reels?(?!/audio/))/(?P<id>[^/?#&]+))"),
     }
     for key in supported_urls:
         if supported_urls[key].search(url):
@@ -138,19 +147,19 @@ def create_download_dialog(key) -> dict:
         "youtube": ("audio", "video"),
         "soundcloud": ("audio"),
         "yandex": ("audio"), 
-        "rutube": ("audio"),
+        "rutube": ("audio","video"),
         "coub" : ("audio", "video"),
         "tiktok": ("video"),
         "instagram": ("video"),
     }
 
     buttons = {
-        "audio": ('🎶Audio', 'audio'),
-        "video": ('📺Video', 'video'),
+        "audio": ("🎶Audio", "audio"),
+        "video": ("📺Video", "video"),
     }
 
     kbd = InlineKeyboardBuilder()
-    text_and_data = [ buttons[btn] for btn in buttons if btn in options[key] ] + [('❌', 'exit')]
+    text_and_data = [ buttons[btn] for btn in buttons if btn in options[key] ] + [("❌", "exit")]
     row_btns = (InlineKeyboardButton(text = text, callback_data = data) for text, data in text_and_data)
     kbd.row(*row_btns)
     return {"text": "Может качнем эту ☝ ссылку?", "reply_markup": kbd.as_markup() }
@@ -158,12 +167,12 @@ def create_download_dialog(key) -> dict:
 
 dp = Dispatcher()
 
-@dp.callback_query(StateFilter(TuneLoaderStates.select_action))
+@dp.callback_query(StateFilter(DownloadActions.select_action))
 async def inline_kb_answer_callback_handler(query: CallbackQuery, state: FSMContext):
     await query.answer()
     await query.bot.delete_message(chat_id = query.message.chat.id, message_id = query.message.message_id)
-    if query.data != 'exit':
-        await process_message(USER_DATA[query.from_user.id], query.data == 'video')
+    if query.data != "exit":
+        await process_message(USER_DATA[query.from_user.id], query.data == "video")
     await state.clear()
  
 @dp.message()
@@ -173,7 +182,7 @@ async def on_process_message(message: Message, state: FSMContext):
         if url_type:
             USER_DATA[message.from_user.id] = message
             await message.answer(**create_download_dialog(url_type))
-            await state.set_state(TuneLoaderStates.select_action)
+            await state.set_state(DownloadActions.select_action)
 
 @dp.channel_post()
 async def on_process_channel_post(message: Message):
@@ -182,11 +191,68 @@ async def on_process_channel_post(message: Message):
             await process_message(message, False)
 
 ##############################################################
+
+async def send_audio_message(bot : Bot, download):
+    if download["file_size"] < TG_MAX_FILE_SIZE:
+        await bot.send_audio(download["user_id"],
+            FSInputFile(download["file_path"]), 
+            title = download["title"],
+            performer = download["performer"],
+            caption = hlink("#origin", download["url"]) + "  " + hlink("#file", download["server_url"]))
+    else:
+        await bot.send_message(download["user_id"], hlink(download["link_text"], download["server_url"]) + "\n" + hlink("#origin", download["url"]))
+    download["delivered"] = int(True)
+    await DB.save_download(download)       
+
+def scan_playlist(sub, playlist):
+    urls = []
+    for ent in playlist:
+        if sub["keywords"]:
+            for kwd in sub["keywords"].split(","):
+                if kwd in ent["title"]:
+                    urls.append(ent["url"])
+        else:
+            urls.append(ent["url"])
+    urls.reverse() # elders first
+    return urls
+
+
+async def watchdog(bot : Bot, DB: Database):
+    while True:
+        await asyncio.sleep(60)
+        try:   
+            subscriptions = await DB.get_subscriptions()      
+            for sub in subscriptions:
+                if sub["last_check"] == None or sub["last_check"] + timedelta(seconds = sub["interval"]) < datetime.now():
+                    sub["last_check"] = datetime.now()
+                    await DB.save_subscription(sub)
+                    
+                    playlist = await download_playlist(sub["url"], "1,2")
+                    for url in scan_playlist(sub, playlist):
+                        result = await DB.find_url(url, False, sub["user_id"])
+                        if result:
+                            if not result["delivered"]:
+                                logging.info(f"download {url} not delivered: trying resend")
+                                enrich_info(result)
+                                result["url"] = url
+                                result["user_id"] = sub["user_id"]
+                                result["video"] = int(False)
+                                await send_audio_message(bot, result)
+                        else:
+                            result = await download(url, False, sub["user_id"])
+                            if result:
+                                await send_audio_message(bot, result)
+        except Exception as e:
+            logging.error(traceback.format_exc())
+
+
 async def main():
     global DB
     DB = await Database.create()
     bot = Bot(token = SETTINGS["telegram-api-token"], default = DefaultBotProperties(parse_mode = "HTML"))
-    await dp.start_polling(bot)
+    _watchdog = asyncio.create_task(watchdog(bot, DB))
+    _polling = dp.start_polling(bot)
+    await asyncio.gather(_watchdog, _polling)
 
 if __name__ == "__main__":
     logging.basicConfig(format="%(asctime)s %(levelname)-8s %(message)s", level = logging.INFO, datefmt="%Y-%m-%d %H:%M:%S")

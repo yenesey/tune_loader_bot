@@ -1,36 +1,37 @@
-import logging
 import asyncio
+import logging
+import os
+
 # import copy
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
-import os
-import json
 
 from settings import SETTINGS
 
 YTDL_OPTS = {
-    "paths": {"temp" : SETTINGS["download-dir"], "home": SETTINGS["download-dir"]},
+    "paths": {"temp": SETTINGS["download-dir"], "home": SETTINGS["download-dir"]},
     "extractor_args": {
-        "player_client" : "web",
-        "youtube" : {
-            "po_token" : [f'web.gvs+{SETTINGS["po-token-gvs"]}', f'web.player+{SETTINGS["po-token-web"]}' ],
+        "player_client": "web",
+        "youtube": {
+            "po_token": [
+                f"web.gvs+{SETTINGS['po-token-gvs']}",
+                f"web.player+{SETTINGS['po-token-web']}",
+            ],
             "youtube_player_js_version": "actual",
             "youtube_player_js_variant": "main",
         },
-        "youtubetab" : {
-            "skip" : "authcheck"
-        }
+        "youtubetab": {"skip": "authcheck"},
     },
-    "js_runtimes" : {"deno": {"path": "/home/denis/.deno/bin/deno"}},
-    "cookiefile" : os.path.join(os.getcwd(), "cookies.txt"),
+    "js_runtimes": {"deno": {"path": "/home/denis/.deno/bin/deno"}},
+    "cookiefile": os.path.join(os.getcwd(), "cookies.txt"),
     "postprocessors": [],
     # "postprocessor_args": {
-        # "videoconvertor": ["-c:v", "libx264", "-preset",  "fast", "-crf", "23", "-c:a", "aac", "-b:a" "128k"]
+    # "videoconvertor": ["-c:v", "libx264", "-preset",  "fast", "-crf", "23", "-c:a", "aac", "-b:a" "128k"]
     # },
     # "format": "bestvideo*+bestaudio/best",
     # "format": "best",
     # "format": "(mp4)[height<960]",
-    "outtmpl": f"%(title).100s",
+    "outtmpl": "%(title).100s",
     "outtmpl_na_placeholder": "",
     "progress_hooks": [],
     "postprocessor_hooks": [],
@@ -40,7 +41,8 @@ YTDL_OPTS = {
     # "verbose": True
 }
 
-async def download_media(target_dir, url, video = False) -> dict:
+
+async def download_media(target_dir, service, url, video=False) -> dict | None:
     result = None
     postproc_status = {}
 
@@ -51,18 +53,18 @@ async def download_media(target_dir, url, video = False) -> dict:
         pp = d["postprocessor"]
         status = d["status"]
         if not (pp in postproc_status and status == postproc_status[pp]):
-            logging.info(pp + ":" + status  + ":" + info.get("title")  )
+            logging.info(pp + ":" + status + ":" + info.get("title"))
         postproc_status[pp] = status
         if not result:
             if (pp == "MoveFiles") and (status == "finished"):
                 filename = os.path.basename(info.get("filepath"))
                 filepath = os.path.join(target_dir, filename)
                 result = {
-                    "title" : info.get("title"),
-                    "artist" : info.get("artist"),
-                    "channel" : info.get("channel") or info.get("uploader"),
-                    "file_name" : filename,
-                    "file_path" : filepath,
+                    "title": info.get("title"),
+                    "artist": info.get("artist"),
+                    "channel": info.get("channel") or info.get("uploader"),
+                    "file_name": filename,
+                    "file_path": filepath,
                     "file_size": os.path.getsize(filepath),
                 }
                 # logging.info(json.dumps(result, indent=2, ensure_ascii=False))
@@ -70,15 +72,21 @@ async def download_media(target_dir, url, video = False) -> dict:
 
     YTDL_OPTS["paths"]["home"] = target_dir
     YTDL_OPTS["postprocessor_hooks"] = [postproc]
-    YTDL_OPTS["postprocessors"] = [{
-            "key": "FFmpegVideoConvertor", 
-            "preferedformat": "mp4"
-        }] if video else [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        }]
-    YTDL_OPTS["format"] = "(mp4,webm)[height<960]" if video else "best"
+    YTDL_OPTS["postprocessors"] = (
+        [{"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}]
+        if video
+        else [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }
+        ]
+    )
+    if service == "youtube":
+        YTDL_OPTS["format"] = "(mp4,webm)[height<960]" if video else "bestaudio/best"
+    else:
+        YTDL_OPTS["format"] = "bestvideo*+bestaudio/best"
 
     try:
         with YoutubeDL(YTDL_OPTS) as ydl:
@@ -90,9 +98,9 @@ async def download_media(target_dir, url, video = False) -> dict:
     return result
 
 
-async def download_playlist(url, items = "1"):
+async def download_playlist(url, items="1"):
     YTDL_OPTS["playlist_items"] = items
     with YoutubeDL(YTDL_OPTS) as ydl:
         # note: logging with "logger" works only on DEBUG level
-        info = await asyncio.to_thread(ydl.extract_info, url = url, download = False)
+        info = await asyncio.to_thread(ydl.extract_info, url=url, download=False)
         return info["entries"]

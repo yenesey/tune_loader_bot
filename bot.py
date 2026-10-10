@@ -3,12 +3,17 @@ import asyncio
 import logging
 import os
 import re
+
 import traceback
 import urllib.parse
 from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Dict
 
+import whisper
+import tempfile
+
 from aiogram import Bot, Dispatcher  # , Router
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.default import DefaultBotProperties
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
 from aiogram.filters import StateFilter
@@ -38,7 +43,7 @@ from settings import SETTINGS
 USER_DATA = {}
 TG_MAX_FILE_SIZE = 50 * 1024 * 1024
 DB = Database()
-
+model = whisper.load_model("turbo")
 
 ######################################################################
 class DownloadActions(StatesGroup):
@@ -98,12 +103,13 @@ async def find(url: str, video: bool) -> dict | None:
         return enrich_info(found)
 
 
-async def download(url: str, video: bool, user_id: str | None) -> dict:
+async def download(url: str, video: bool, user_id: str | None) -> dict | None:
     date = datetime.now()
     target_dir = f"{SETTINGS['download-dir']}/{sub_dir(date)}"
     if not os.path.isdir(target_dir):
         os.makedirs(target_dir)
-    loaded = await download_media(target_dir, url, video)
+    service = check_url(url)
+    loaded = await download_media(target_dir, service, url, video)
     if loaded:
         loaded["date"] = date
         loaded["user_id"] = user_id
@@ -111,7 +117,7 @@ async def download(url: str, video: bool, user_id: str | None) -> dict:
         loaded["video"] = int(video)
         loaded["delivered"] = int(False)
         await DB.save_download(loaded)
-        enrich_info(loaded)
+        loaded = enrich_info(loaded)
     return loaded
 
 
@@ -212,7 +218,7 @@ async def inline_kb_answer_callback_handler(query: CallbackQuery, state: FSMCont
     await query.answer()
     if query.bot and query.message:
         await query.bot.delete_message(
-            chat_id=query.message.chat.id, message_id=query.message.message_id
+            chat_id = query.message.chat.id, message_id = query.message.message_id
         )
     if query.data != "exit":
         await process_message(USER_DATA[query.from_user.id], query.data == "video")
@@ -222,23 +228,54 @@ async def inline_kb_answer_callback_handler(query: CallbackQuery, state: FSMCont
 @dp.message()
 async def on_process_message(message: Message, state: FSMContext):
     if message and message.text:
-        url_type = check_url(message.text)
-        if url_type:
+        service = check_url(message.text)
+        if service:
             if message.from_user:
                 USER_DATA[message.from_user.id] = message
-            await message.answer(**create_download_dialog(url_type))
+            await message.answer(**create_download_dialog(service))
             await state.set_state(DownloadActions.select_action)
-
+    if message and message.voice:
+        await transcribe_message(message)
 
 @dp.channel_post()
 async def on_process_channel_post(message: Message):
     if message and message.text:
-        if check_url(message.text):
+        service = check_url(message.text)
+        if service:
             await process_message(message, False)
+    if message and message.voice:
+        await transcribe_message(message)
 
 
 ##############################################################
+async def transcribe_message(message: Message):
+    bot = message.bot
+    if message and message.voice:
+        file = await bot.get_file(message.voice.file_id)
+    with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+        file_path = tmp.name
+        await bot.download_file(file.file_path, file_path)
 
+    try:
+        # 3. Транскрипция через Whisper (запускаем в отдельном потоке, чтобы не блокировать event loop)
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,  # использует стандартный ThreadPoolExecutor
+            lambda: model.transcribe(file_path, language="ru")  # явно указываем русский язык
+        )
+        transcript = result["text"].strip()
+
+        # 4. Отправляем текст обратно в канал (как ответ на сообщение)
+        if transcript:
+            await message.reply(f"🎤 Распознано:\n\n{transcript}")
+        else:
+            await message.reply("Не удалось распознать речь.")
+    except Exception as e:
+        await message.reply(f"Ошибка распознавания: {e}")
+    finally:
+        # 5. Удаляем временный файл
+        if os.path.exists(file_path):
+            os.remove(file_path)
 
 async def send_audio_message(bot: Bot, download):
     if download["file_size"] < TG_MAX_FILE_SIZE:
@@ -297,7 +334,7 @@ async def watchdog(bot: Bot, DB: Database):
                                 logging.info(
                                     f"download {url} not delivered: trying resend"
                                 )
-                                enrich_info(result)
+                                result = enrich_info(result)
                                 result["url"] = url
                                 result["user_id"] = sub["user_id"]
                                 result["video"] = int(False)
@@ -313,10 +350,7 @@ async def watchdog(bot: Bot, DB: Database):
 async def main():
     global DB
     DB = await Database.create()
-    bot = Bot(
-        token=SETTINGS["telegram-api-token"],
-        default=DefaultBotProperties(parse_mode="HTML"),
-    )
+    bot = Bot(token=SETTINGS["telegram-api-token"],  default=DefaultBotProperties(parse_mode="HTML"))
     _watchdog = asyncio.create_task(watchdog(bot, DB))
     _polling = dp.start_polling(bot)
     await asyncio.gather(_watchdog, _polling)

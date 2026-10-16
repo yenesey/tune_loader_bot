@@ -1,0 +1,483 @@
+# План рефакторинга tune_loader_bot
+
+Документ подготовлен по фактическому коду (`bot.py`, `download.py`, `database.py`,
+`settings.py`, `install-service-systemd.sh`), `AGENTS.md`, `requirements.txt` и
+установленным пакетам в `.venv`.
+
+Цели (в порядке приоритета):
+
+1. Надёжность: убрать глобальное мутабельное состояние, гонки, падения на
+   «пустой» БД, ошибки типов в `file_size`/`user_id`.
+2. Тестируемость: покрыть логику тестами (pytest), для чего вынести чистые
+   функции и убрать side effects с уровня импорта.
+3. Модульность по смыслу: конфиг / домен-сервисы / медиа (yt-dlp) / хранилище /
+   telegram-слой / фоновые задачи / транскрипция.
+4. Предсказуемость эксплуатации: миграции живой БД, бэкап, логи, graceful stop.
+
+---
+
+## 0. Что проверено и чего проверить не удалось
+
+Проверено по коду и по содержимому `.venv`:
+
+- Python 3.13, aiogram **3.28.2**, aiosqlite, yt-dlp **2026.8.19** в venv, при
+  этом `requirements.txt` пинит **2026.3.17** → дрейф версий.
+- `openai-whisper 20250625` + torch/numpy/triton установлены в venv, но
+  отсутствуют в `requirements.txt`.
+- В venv **нет** pytest / pytest-asyncio / anyio → тестовый стек надо ставить.
+- В aiogram 3.28.2 **нет** `aiogram.test_utils.MockedBot` → для тестов
+  хендлеров нужен свой минимальный `RecordingBot` (или фейковая сессия).
+- `Dispatcher.feed_update(bot, update)` есть (`aiogram/dispatcher/dispatcher.py:141`)
+  → хендлеры можно тестировать без сети.
+- Гит-репозиторий есть (`origin = github.com/yenesey/tune_loader_bot`, ветки
+  `main`, `develop`), `.gitignore` покрывает секреты, БД, логи.
+- Аргументы yt-dlp проверены по установленной версии:
+  - `js_runtimes` — реальный параметр (`yt_dlp/options.py:462`);
+  - корректная форма — `extractor_args = {'youtube': {'player_client': [...],
+    'player_js_version': ..., 'player_js_variant': ...}}`
+    (`yt_dlp/extractor/youtube/_video.py:1901, 2115, 2982, 1128`);
+  - в `download.py` `"player_client": "web"` и ключи
+    `youtube_player_js_version` / `youtube_player_js_variant` лежат **на уровне
+    имён экстракторов** и поэтому молча игнорируются.
+
+Ограничение среды: в текущей сессии **не работает bash** (нет sandbox-бэкенда
+для режима workspace-write), поэтому не удалось: запустить `python -m pytest`,
+посмотреть схему живой `downloads.db`, сверить `pip freeze`. Все выводы по БД —
+из кода + `AGENTS.md`. Перед реализацией нужен рабочий shell (либо
+`danger-full-access`, либо установленный bubblewrap/Landlock).
+
+---
+
+## 1. Карта дефектов (что именно «причесываем»)
+
+Severity: **C** — ломает данные/прод, **H** — заметный баг, **M** — хрупкость,
+**L** — стиль/эксплуатация.
+
+| # | Sev | Проблема | Где |
+|---|---|---|---|
+| D1 | C | `CREATE TABLE downloads` не содержит `artist`, `channel`, `delivered`, а `save_download`/`find_url` их используют → на **чистой** БД всё падает (`no such column`). Схема живёт только потому, что колонки добавлены руками | `database.py:33-41` vs `57-64, 67-91` |
+| D2 | C | `user_id` в UNIQUE-индексе, но допускает NULL (посты канала): в SQLite NULL-ы уникальны → повторный пост той же ссылки создаёт новую строку и повторную загрузку. Плюс тип `user_id` не консистентен: `str()` в ЛС, `int` из подписки → у одного пользователя две «разные» записи | `database.py:37`, `bot.py:131`, `bot.py:343` |
+| D3 | C | Глобальный мутируемый `YTDL_OPTS`: `format`, `postprocessors`, `paths`, `playlist_items` переписываются на каждый вызов → одновременные загрузки (пользователь + watchdog) перемешивают настройки | `download.py:11-42, 73-89, 102` |
+| D4 | H | `extractor_args` собран неправильно (см. §0): `player_client`, `youtube_player_js_*` не действуют; po-token'ы вложены верно, но эффект частичный | `download.py:13-24` |
+| D5 | H | `outtmpl = "%(title).100s"` + `overwrites: True`: два разных видео с одинаковым названием **затирают** друг друга, а в БД обе записи указывают на один файл | `download.py:34, 38, 60-68` |
+| D6 | H | Хук `MoveFiles`: `os.path.getsize(filepath)` без проверки существования, `os.path.basename(info.get("filepath"))` при `None` → исключение внутри хука, `result = None`, `file_size = None`; далее `result["file_size"] < TG_MAX_FILE_SIZE` → `TypeError` | `download.py:58-69`, `bot.py:136` |
+| D7 | H | `find_url(url, video)` без `user_id` возвращает произвольную строку (первую по индексу) → чужой `delivered`/метаданные, «кэш» не привязан к пользователю. Файл на диске не проверяется, хотя каталог ~93 ГБ и чистится | `database.py:67-91`, `bot.py:100-104` |
+| D8 | H | `ON CONFLICT ... DO UPDATE SET delivered = excluded.delivered` — повторная загрузка не обновляет `file_size`/`title`/`artist`/`channel`/`date`, `None`-размер остаётся навсегда | `database.py:61-62` |
+| D9 | M | `USER_DATA` — обычный dict с объектами `Message`: течёт, теряется при рестарте (callback → `KeyError`), не учитывает несколько чатов на пользователя | `bot.py:43, 224, 234` |
+| D10 | M | `create_download_dialog`: `("audio")` — это строка, а не кортеж, поэтому `btn in options[key]` работает как поиск подстроки; набор форматов и параметры yt-dlp описаны в двух несвязанных местах | `bot.py:186-210`, `download.py:86-89` |
+| D11 | M | `check_url`: незаэкранированные точки (`www.`, `.be/`), необязательный префикс `youtu(?:...)?` → совпадёт `https://youtubeevil.com/...`; нет нормализации хоста/регистра; rutube/coub/instagram — сложные regex без тестов | `bot.py:163-182` |
+| D12 | M | `datetime.strptime(..., "%Y-%m-%d %H:%M:%S.%f")` без fallback: строка без микросекунд (или записанная другим инструментом) валит весь тик watchdog; `find_url` режет `fetch[0][:10]`; `datetime.now()` без tz | `database.py:81, 105`, `bot.py:323-326` |
+| D13 | M | watchdog: один `try` на весь цикл, `last_check` сохраняется **до** работы (после ошибки подписка «считается проверенной»), `playlist_items` захардкожен `"1,2"`, фильтр ключевых слов — подстрока с учётом регистра, `DB` берётся из глобала, хотя передан параметром | `bot.py:302-347` |
+| D14 | M | `whisper.load_model("turbo")` на импорте: +1.4 ГБ RSS и медленный старт, даже если голосовые не используются; нет ограничения параллельных транскрипций; `file` может быть не определён; язык захардкожен | `bot.py:46, 251-278` |
+| D15 | M | Singleton `Database` с `_conn: aiosqlite.Connection` как заглушкой класса, путь `"downloads.db"` захардкожен относительно CWD, нет `close()`, нет `WAL`/`busy_timeout`, `create()` можно вызвать повторно и потерять соединение | `database.py:7-45` |
+| D16 | M | `requirements.txt` — полный freeze с транзитивными зависимостями, без whisper/torch и без dev-зависимостей; версия yt-dlp разошлась с venv | `requirements.txt` |
+| D17 | M | `settings.py`: `json.load(open('settings.json'))` на импорте, без валидации и внятной ошибки, путь зависит от CWD | `settings.py:15-18` |
+| D18 | L | systemd: `StandardOutput=file:` **обрезает лог** при каждом рестарте, `Description=Torrent Manager Bot`, `SyslogIdentifier=torrent-manager-bot`, запуск через `bash -c "source .venv/bin/activate"` | `install-service-systemd.sh:51,55,56,65` |
+| D19 | L | Нет graceful shutdown: БД не закрывается, watchdog-задача не отменяется; middleware регистрируется только под `__main__`, поэтому тестируемый `dp` не равен боевому | `bot.py:350-366` |
+| D20 | L | `enrich_info` мутирует входной dict, молча возвращает `None`, склеивает путь f-строкой; `sub_dir`/`server_url` — единственное место, где живёт правило раскладки файлов | `bot.py:75-97` |
+| D21 | L | Логика доставки продублирована: `process_message` (edit_media) и `send_audio_message` (send_audio) строят одинаковые подписи `hlink("#origin")/#file` | `bot.py:124-159, 280-299` |
+| D22 | L | Захардкоженный путь к Deno и `cookies.txt` относительно `os.getcwd()` на импорте | `download.py:25-26` |
+| D23 | L | Нет `noplaylist` для одиночной ссылки: вставленный URL плейлиста/канала уедет в веерную загрузку | `download.py:91-94` |
+| D24 | L | `download_playlist` возвращает `info["entries"]` без проверки `info`/`entries` → `None` превращается в `TypeError` в `scan_playlist` | `download.py:101-106`, `bot.py:302-312` |
+| D25 | L | Логирование настраивается только в `__main__`; `logging.error(traceback.format_exc())` вместо `logging.exception`; `SecurityMiddleware` печатает `data.keys()` (шум + приватность) | `bot.py:68-69, 158, 347, 360-364` |
+
+---
+
+## 2. Целевая структура
+
+```
+tune_loader_bot/                # пакет (ставится/запускается как модуль)
+├── __init__.py
+├── __main__.py                 # python -m tune_loader_bot
+├── app.py                      # composition root: config → db → media → bot/dp → jobs
+├── config.py                   # Settings (dataclass/pydantic) + load_settings(path) + валидация
+├── logging_setup.py            # единая настройка логов, уровень из конфига
+├── domain/
+│   ├── models.py               # Download, Subscription (dataclass, from_row/to_row)
+│   └── services.py             # ServiceSpec-реестр: match(url), formats, ytdlp-параметры
+├── storage/
+│   ├── db.py                   # aiosqlite-обёртка: connect/close, PRAGMA, запросы
+│   └── migrations.py           # PRAGMA user_version + шаги миграций + backup
+├── media/
+│   ├── paths.py                # sub_dir, file_path_for, public_url, enrich
+│   └── ytdlp.py                # build_options(...) (чистая!), download(), extract_playlist()
+├── telegram/
+│   ├── dispatcher.py           # create_dispatcher(deps)
+│   ├── middleware.py           # SecurityMiddleware
+│   ├── keyboards.py            # диалог выбора формата
+│   ├── texts.py                # все пользовательские строки (ru)
+│   ├── captions.py             # сборка подписей/ссылок
+│   ├── delivery.py             # отправка audio/video/ссылки, отметка delivered
+│   └── handlers.py             # message / callback_query / channel_post
+├── jobs/
+│   └── watchdog.py             # SubscriptionWatcher.start()/stop()
+├── transcription/
+│   └── whisper_service.py      # ленивая загрузка модели, semaphore, to_thread
+└── tests/                      # или корневой tests/
+```
+
+Правила, которые делают код тестируемым:
+
+- **Никакого I/O на импорте**: конфиг читается функцией, модель Whisper — лениво,
+  соединение с БД — в `app.py`, `YTDL_OPTS` не существует как глобал.
+- Зависимости передаются явно (`db`, `media`, `cfg`, `bot`), а не берутся из
+  глобального пространства модулей.
+- `telegram/dispatcher.py:create_dispatcher(deps)` собирает `Dispatcher` целиком
+  (включая middleware) → в тестах и в бою объект один и тот же.
+- Слой `domain/services.py` — единственный источник правды о сервисах: он же
+  кормит `check_url`, клавиатуру и параметры yt-dlp (устраняет D10/D11/D23).
+- Совместимость: корневой `bot.py` остаётся тонким шимом
+  (`from tune_loader_bot.app import main`), чтобы systemd-юнит не менялся.
+
+Альтернатива «минимум телодвижений»: не заводить пакет, а разложить корень на
+`bot.py`, `handlers.py`, `media.py`, `storage.py`, `services.py`, `watchdog.py`,
+`transcribe.py`. Быстрее, но плоские импорты и циклические зависимости будут
+мешать; рекомендую пакет.
+
+---
+
+## 3. Этапы работ
+
+Каждый этап — отдельная ветка/PR, самостоятельно деплоится и не требует
+перезапуска сервиса до момента выката.
+
+### Фаза 0. Страховка (0.5 дня)
+
+- Ветка `refactor/*` от `develop`; тег/коммит-метка базового состояния.
+- `pyproject.toml`: метаданные проекта, `[tool.ruff]`, `[tool.pytest.ini_options]`
+  (`asyncio_mode = "auto"`, `testpaths`, маркеры `network`, `slow`).
+- `requirements.in` → `requirements.txt` (прямые зависимости: aiogram, aiosqlite,
+  yt-dlp, yt-dlp-ejs; whisper/torch — extras `[whisper]`) и
+  `requirements-dev.txt` (pytest, pytest-asyncio, pytest-cov, ruff).
+- `.gitignore`: `downloads.db*` (WAL/SHM), `.pytest_cache/`, `.ruff_cache/`,
+  `.coverage`, `htmlcov/`, `*.bak`.
+- Makefile/скрипты: `make lint`, `make test`, `make run`.
+- **Характеризационные тесты** на текущее поведение (см. §4) — фиксируют
+  «как есть», чтобы рефакторинг было с чем сравнивать.
+
+DoD: `ruff check` и `pytest` зелёные на нерефакторенном коде; тесты не требуют
+сети, torch и секретов.
+
+### Фаза 1. Конфиг и пути (0.5 дня)
+
+- `config.py`: `Settings` (pydantic уже есть транзитивно через aiogram) с
+  ключами `telegram-api-token`, `po-token-*`, `download-dir`,
+  `server-root-url`, `users-list`, плюс новые: `db-path` (default
+  `downloads.db`), `deno-path` (default `shutil.which("deno")`),
+  `cookies-file`, `max-concurrent-downloads`, `whisper-model`,
+  `whisper-language`, `log-level`.
+- `load_settings(path)` c переменной окружения `TUNE_LOADER_SETTINGS` и понятной
+  ошибкой («не найден settings.json по пути …»), кэш `get_settings()`.
+- `settings.example.json` без секретов.
+
+DoD: тесты на загрузку/валидацию/дефолты; прод-путь `./settings.json`
+продолжает работать.
+
+### Фаза 2. Хранилище и миграции (1.5–2 дня) — самая рискованная
+
+- `storage/models.py`: `Download`, `Subscription` (dataclass + `from_row`),
+  канонизация типов: `user_id: int` (для постов канала — `0`), `video: bool`,
+  `delivered: bool`, `file_size: int | None`.
+- `storage/db.py`: соединение с `row_factory=aiosqlite.Row`,
+  `PRAGMA journal_mode=WAL`, `busy_timeout=5000`, `foreign_keys=ON`, `close()`;
+  путь из конфига; никакого singleton-`__new__`.
+- `storage/migrations.py`: `PRAGMA user_version` + список шагов.
+  - **v1**: полная `CREATE TABLE` (включая `artist`, `channel`, `delivered`,
+    `user_id NOT NULL DEFAULT 0`) — лечит D1, чистая БД поднимается с нуля.
+  - **v2**: для живой БД — добавить недостающие колонки по `PRAGMA table_info`
+    (SQLite не умеет `ADD COLUMN IF NOT EXISTS`), затем:
+    `UPDATE downloads SET user_id = 0 WHERE user_id IS NULL`;
+    `UPDATE downloads SET user_id = CAST(user_id AS INTEGER) WHERE typeof(user_id) = 'text'`;
+    дедупликация `(url, video, user_id)` с сохранением самой свежей строки и
+    `delivered = MAX(delivered)`;
+    пересоздание `idx_downloads`. Перед всем этим — `shutil.copy2` в
+    `downloads.db.YYYYmmdd-HHMMSS.bak` (только если `user_version < target`).
+  - v3: нормализация меток времени (`%Y-%m-%d %H:%M:%S`), терпимый парсер
+    (набор форматов + `None` при неудаче).
+- `find_url` — всегда с обязательным `user_id` и `ORDER BY date DESC LIMIT 1`;
+  `save_download` — `DO UPDATE SET` всех изменяемых полей (лечит D7/D8).
+- Отдельная команда `python -m tune_loader_bot.migrate --check/--apply` и
+  read-only `scripts/db_report.py` (кол-во записей, дубликаты, NULL user_id,
+  строки без файла на диске).
+
+DoD: миграция прогоняется на **копии** живой БД: число строк не уменьшилось
+(≥2055), дубликатов нет, `find_url`/`save_download` работают; тесты на
+in-memory БД и на копии.
+
+### Фаза 3. Медиа-слой / yt-dlp (1–1.5 дня)
+
+- `media/ytdlp.py`:
+  - `build_options(spec, target_dir, cfg, *, for_playlist=False) -> dict` —
+    **чистая функция**, каждый вызов возвращает новый dict (лечит D3);
+  - корректный `extractor_args`: `{"youtube": {"player_client": ["web"],
+    "po_token": [...], "player_js_version": ..., "player_js_variant": ...}}`,
+    `js_runtimes` из конфига (лечит D4/D22);
+  - `retries`, `fragment_retries`, `socket_timeout`, `extractor_retries`,
+    `concurrent_fragment_downloads`, `noprogress`, `noplaylist` для одиночного
+    медиа (D23);
+  - сбор результата через хук-класс с состоянием: проверка
+    `info.get("filepath")`, `os.path.isfile`, fallback на `prepare_filename`;
+    при отсутствии файла — понятный лог и `None` вместо исключения (D6);
+  - политика имён: добавить `%(id)s` в `outtmpl` для **новых** загрузок
+    (старые имена в БД не трогаем) + `restrictfilenames`/санитизация (D5);
+  - `extract_playlist()` на «лёгком» наборе опций (`skip_download`,
+    `extract_flat="in_playlist"`, без постпроцессоров), терпимость к
+    `info is None` и `entries is None` → `[]` (D24);
+  - обработка ошибок: `DownloadError` + `OSError`/`PostProcessingError`,
+    логирование с URL и длительностью;
+  - инъекция фабрики `ydl_factory` — тесты подменяют `YoutubeDL` без сети.
+- `media/paths.py`: `sub_dir`, `file_path_for`, `public_url` (корректный
+  `quote(..., safe="")`), `enrich` без мутации входа (D20).
+- Конкурентность: `asyncio.Semaphore(cfg.max_concurrent_downloads)` и
+  per-URL `asyncio.Lock` — два одновременных запроса одной ссылки не качают
+  файл дважды.
+
+DoD: тесты фабрики опций (изоляция словарей при конкурентных вызовах, разные
+наборы для audio/video/playlist), тесты хука (файл есть / файла нет / `filepath`
+= None), тест «`DownloadError` → None и запись в лог».
+
+### Фаза 4. Реестр сервисов (0.5 дня)
+
+- `domain/services.py`: `ServiceSpec(name, patterns, formats, audio_format,
+  video_format, need_js_runtime, need_cookies)`; матчинг через
+  `urllib.parse.urlsplit` + нормализованный хост + точные хосты/пути, набор
+  негативных кейсов в тестах (D10/D11).
+- `check_url` и клавиатура строятся из реестра; `formats` — множество, а не
+  строка-подстрока.
+
+DoD: golden-таблица URL (~40 кейсов, включая `youtu.be`, `music.youtube.com`,
+`youtubeevil.com`, `m.youtube.com`, `vt.tiktok.com`, `instagram.com/reel/...`,
+мусор в query/фрагменте, верхний регистр хоста).
+
+### Фаза 5. Telegram-слой (1.5 дня)
+
+- `telegram/texts.py`, `keyboards.py`, `captions.py`, `delivery.py`, `handlers.py`,
+  `middleware.py`, `dispatcher.py:create_dispatcher(deps)`.
+- Состояние диалога — в FSM (`state.update_data(chat_id, message_id, url)`) вместо
+  `USER_DATA`; callback без данных отвечает «ссылка устарела, пришлите снова»
+  вместо `KeyError` (D9).
+- Проверка перед отправкой: существует ли `file_path` и не `None` ли
+  `file_size`; при отсутствии файла — повторная загрузка/честная ошибка (D6/D7).
+- Единая точка доставки и единый конструктор подписи (D21); удаление исходного
+  сообщения — best-effort с логом.
+- Middleware регистрируется в фабрике (D19), логи без дампа `data.keys()` (D25).
+
+DoD: тесты через `dp.feed_update(recording_bot, Update(...))`: чужой user_id
+отбрасывается, ЛС со ссылкой → клавиатура, callback → вызов доставки (с фейковым
+media), устаревший callback не падает, channel_post скачивается как audio.
+
+### Фаза 6. Watchdog (0.5–1 день)
+
+- `jobs/watchdog.py`: класс с `start()/stop()`, цикл по монотонным часам,
+  `stop()` отменяет задачу; инъекция `clock`, `media`, `db`, `bot`, `cfg`.
+- `last_check` двигается **после** успешной проверки; ошибка подписки не
+  прерывает остальные (per-subscription `try/except` + `logging.exception`).
+- `playlist_items` и число проверяемых записей — из конфига; фильтр ключевых
+  слов: регистронезависимо, разделители `,`, поддержка исключений через `-` (D13).
+
+DoD: тесты «подписка не созрела/созрела», «новый элемент скачан и доставлен»,
+«`delivered=0` → повторная отправка», «ошибка первой подписки не мешает второй»,
+«`last_check` не сдвинулся при ошибке».
+
+### Фаза 7. Транскрипция (0.5 дня)
+
+- `transcription/whisper_service.py`: ленивая загрузка модели (первый вызов,
+  а не импорт), `asyncio.to_thread`, `Semaphore(1)`, модель/язык из конфига,
+  опциональность зависимости (нет whisper → фича выключена с внятным логом),
+  `TemporaryDirectory` вместо `delete=False`, проверка размера/длительности (D14).
+
+DoD: тест с фейковым транскрибером; старт приложения без загрузки torch;
+замер «до/после» времени старта и RSS зафиксирован в PR.
+
+### Фаза 8. Композиция, эксплуатация, документация (1 день)
+
+- `app.py`: сборка зависимостей, `on_startup/on_shutdown` (закрыть БД, остановить
+  watchdog, закрыть сессию бота), корректный SIGTERM; `bot.py` — шим.
+- `logging_setup.py`: формат/уровень из конфига, `logging.exception`.
+- `install-service-systemd.sh`: `StandardOutput=append:`, осмысленные
+  `Description`/`SyslogIdentifier`, `Environment=PYTHONUNBUFFERED=1`,
+  `ExecStart=.venv/bin/python -m tune_loader_bot` (без `bash -c`), проверка прав
+  на `/var/log`.
+- GitHub Actions: `ruff check`, `pytest` (без network-маркера) на Python 3.13.
+- Обновить `AGENTS.md` (новая структура, команды, миграции) и `README.md`.
+
+DoD: CI зелёный, `python -m tune_loader_bot` поднимается на копии окружения,
+`systemctl`-юнит не сломан.
+
+**Суммарно: ~8–10 рабочих дней.** Критический путь — фазы 0→2→3 (данные и
+медиа); фазы 4–8 можно параллелить/делать инкрементально.
+
+---
+
+## 4. Тестовая стратегия
+
+Инструменты: `pytest`, `pytest-asyncio` (`asyncio_mode=auto`), `pytest-cov`,
+`ruff`. Сеть, yt-dlp, ffmpeg, torch — **вне** юнит-тестов (всё через фейки).
+
+Раскладка:
+
+```
+tests/
+├── conftest.py            # фикстуры: settings, tmp settings.json, db, recording_bot, fake_ydl, clock
+├── test_config.py
+├── test_paths.py
+├── test_services_registry.py
+├── test_db.py             # in-memory + миграции
+├── test_db_migration_live.py  # на КОПИИ downloads.db, skip если файла нет
+├── test_ytdlp_options.py
+├── test_ytdlp_download.py
+├── test_watchdog.py
+├── test_handlers.py
+└── test_whisper_service.py
+```
+
+Ключевые фикстуры:
+
+- `settings` — `Settings` с `tmp_path` в качестве `download-dir` и `db-path`;
+  `settings.json` пишется в `tmp_path` (секреты в тестах фиктивные).
+- `db` — `tmp_path/"test.db"`, миграции применены; никаких обращений к живой БД.
+- `live_db_copy` — `shutil.copy2("downloads.db", tmp_path)` (skip, если файла
+  нет); проверяем: строки не потеряны, дубликатов нет, все строки читаются.
+- `recording_bot` — наследник `aiogram.Bot` с подменённой сессией, копит вызовы
+  `send_audio`/`send_message`/`edit_media` (готового `MockedBot` в 3.28.2 нет).
+- `fake_ydl` — класс с `download()`/`extract_info()`, который вызывает
+  postprocessor-хук с подготовленным `info_dict` и создаёт файл в `tmp_path`.
+- `clock` — вызываемый объект времени, чтобы тестировать интервалы подписок без
+  `sleep`.
+
+Покрытие (порог в CI):
+
+- overall `--cov-fail-under=75`, целевое 85;
+- 90%+ для `storage/`, `media/paths.py`, `media/ytdlp.py`, `domain/`,
+  `jobs/watchdog.py` (там вся логика и все бывшие баги);
+- `transcription/`, сетевые обёртки — исключены из гейта.
+
+Что именно закрывают тесты (регрессии на найденные дефекты):
+
+- D1: `create()` на пустом файле + `save_download` + `find_url` — без ошибок;
+- D2: пост канала с `user_id=None` дважды → одна строка; `str`/`int` user_id →
+  одна строка после канонизации;
+- D3: два конкурентных `build_options` → независимые dict; опции audio не
+  протекают в playlist;
+- D4: снимок-тест собранных `extractor_args` (структура вложенности);
+- D5: два разных видео с одинаковым `title` → разные файлы;
+- D6: хук без файла → `None` + лог, а не исключение; `file_size=None` → ветка
+  «отправить ссылку»;
+- D7: `find_url` не возвращает чужую строку; отсутствующий файл → перезагрузка;
+- D8: повторный `save_download` обновляет метаданные/размер;
+- D9: callback после «рестарта» (пустой FSM) не падает;
+- D10/D11: golden-таблица URL и наборов форматов;
+- D12: `last_check` без микросекунд парсится; битая дата не убивает тик;
+- D13: `last_check` не сдвигается при ошибке; ошибка одной подписки не мешает
+  другим;
+- D14: сервис транскрипции без whisper → фича выключена;
+- D24: `extract_info` → `None`/`entries=None` → `[]`.
+
+Интеграционные (маркер `network`, по умолчанию выключены, запуск вручную):
+реальный `yt-dlp --simulate` по 1–2 стабильным ссылкам + проверка, что Deno и
+cookies подхватываются; прогон `python -m tune_loader_bot` на копии окружения и
+ручной smoke (ссылка → audio, ссылка → video, пост канала, голосовое,
+досылка `delivered=0`).
+
+---
+
+## 5. Работа с живой БД (порядок и безопасность)
+
+1. Бэкап: `sqlite3 downloads.db ".backup 'downloads.db.bak-YYYYmmdd'"` (вне
+   репозитория) — до любых изменений.
+2. Остановить сервис только на время миграции (окно согласовать с
+   пользователем; сами правки кода сервис не трогают).
+3. `python -m tune_loader_bot.migrate --check` (read-only отчёт), затем
+   `--apply` (пишет бэкап-копию рядом с БД и повышает `user_version`).
+4. `python scripts/db_report.py` — сверить количество строк и отсутствие
+   дубликатов/NULL user_id.
+5. Запуск сервиса, проверка логов и одной реальной ссылки.
+6. Откат: восстановить `.bak`, вернуть предыдущий коммит.
+
+Никаких «миграций на старте без бэкапа» для живой БД; для чистой/тестовой —
+автоматически.
+
+---
+
+## 6. Риски и как их снижаем
+
+| Риск | Митигация |
+|---|---|
+| Порча живой БД (2055 записей) | тесты на копии, бэкап, `--check` перед `--apply`, миграции идемпотентны |
+| Регресс в бою (systemd, без CI-деплоя) | каждая фаза отдельным PR, `bot.py`-шим, ручной smoke-чеклист перед выкатом |
+| yt-dlp меняет API/аргументы | версия пинится, снимок-тесты на собранные опции, ручная сверка `-v` после апгрейда |
+| Whisper/torch тяжесть | ленивый импорт, extras `[whisper]`, опция выключения |
+| Долгий рефакторинг «всё сразу» | фазы shippable по отдельности; фазы 1–4 дают максимум эффекта при минимуме риска |
+| Изменение имён файлов на диске | `[id]` в `outtmpl` только для новых загрузок; старые строки не мигрируем |
+
+Non-goals: смена СУБД, веб-интерфейс, изменение пользовательских текстов и
+вёрстки сообщений (кроме выноса в `texts.py`), полная перераскладка уже
+скачанных 93 ГБ, Redis/очереди.
+
+---
+
+## 7. Открытые вопросы к владельцу
+
+1. **Транскрипция**: оставляем Whisper в основном процессе (ленивая загрузка) или
+   выносим в отдельный опциональный сервис? Устанавливать ли whisper/torch в
+   `requirements` как extras?
+2. **Имена новых файлов**: можно ли добавить `[id]` в шаблон имени для новых
+   загрузок, чтобы исключить затирание одноимённых видео?
+3. **Процесс**: feature-ветки в этот же репозиторий с PR в `develop`? Нужен ли CI
+   на GitHub Actions?
+4. **Несколько чатов на пользователя**: нужно ли поддерживать (иначе FSM по
+   `chat_id` достаточно)?
+5. **Окно миграции**: можно ли один раз остановить сервис для бэкапа/миграции БД?
+6. **Порядок работ**: начинать с фаз 0–2 (данные/БД, максимум пользы) или сразу
+   с разбиения на модули (фазы 1, 4, 5)?
+7. **Среда**: для установки pytest и прогонов нужен рабочий shell — разрешить
+   `danger-full-access` для этого воркспейса или починить sandbox?
+
+---
+
+## 8. Учёт прогресса (где хранятся отметки)
+
+Источник правды — **репозиторий**, а не сессия агента. Сессионные списки задач
+(`todo_write`) живут в логе сессии: они переживают сжатие контекста и возврат в
+ту же сессию, но исчезают в новой сессии и не видны в git. Поэтому отметки
+ведутся здесь, в этом файле, и в git-истории.
+
+Правила:
+
+1. **Этот файл.** Статус фазы в таблице ниже + запись в журнале. Отметка ставится
+   только вместе с подтверждением: тесты/линт зелёные, шаг DoD выполнен.
+2. **Git.** Одна фаза = одна ветка `refactor/<phase>` = один PR с чек-листом DoD
+   в описании. Коммиты в формате `refactor(storage): убрать NULL user_id (план D2)` —
+   ссылка на номер дефекта из §1. После мержа в `develop` — отметка в таблице.
+3. **Чек-листы в PR** дублируют DoD фазы; в файле остаётся итог (ссылка на PR).
+4. **`AGENTS.md`** обновляется только при изменении архитектуры/команд запуска,
+   это не журнал.
+5. **Сессионный `todo_write`** — только «что делаю прямо сейчас» в рамках текущей
+   фазы (видно в GUI, помогает не потерять шаг при длинной работе).
+6. Если работа идёт автономными раундами без человека — цель фиксируется через
+   goal-механизм, но по-прежнему с записью итога в таблицу/журнал.
+
+Статусы: `⬜ не начата` · `🔄 в работе` · `🟡 ждёт ревью` · `✅ готово` ·
+`⛔ заблокирована`.
+
+| Фаза | Статус | Ветка / PR | Проверка | Дата |
+|---|---|---|---|---|
+| 0. Страховка (git, pyproject, requirements, характеризационные тесты) | ⬜ | — | — | — |
+| 1. Конфиг и пути | ⬜ | — | — | — |
+| 2. Хранилище и миграции | ⬜ | — | — | — |
+| 3. Медиа-слой / yt-dlp | ⬜ | — | — | — |
+| 4. Реестр сервисов | ⬜ | — | — | — |
+| 5. Telegram-слой | ⬜ | — | — | — |
+| 6. Watchdog | ⬜ | — | — | — |
+| 7. Транскрипция | ⬜ | — | — | — |
+| 8. Композиция, эксплуатация, документация | ⬜ | — | — | — |
+
+Дефекты из §1 закрываются по мере фаз; отметка о закрытии ставится в таблице
+дефектов (колонка «Закрыт в фазе» добавляется по факту первого закрытия).
+
+### Журнал (append-only, новые записи внизу)
+
+Формат: `YYYY-MM-DD · фаза · что сделано · проверка · коммит/PR`
+
+- 2026-10-16 · — · подготовлен план рефакторинга (без правок кода) · `git diff`
+  пуст, план добавлен файлом `REFACTORING_PLAN.md` · —

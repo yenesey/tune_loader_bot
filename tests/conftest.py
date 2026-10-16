@@ -2,7 +2,7 @@
 
 Правила:
 * тесты **не** читают рабочие `settings.json`/`downloads.db`/`cookies.txt` и не
-  пишут в каталог загрузок: каждое тесто живёт в своём `tmp_path`;
+  пишут в каталог загрузок: каждый тест живёт в своём `tmp_path`;
 * `whisper` подменяется заглушкой, поэтому тесты не тянут torch и не грузят
   модель (см. REFACTORING_PLAN.md, D14);
 * модули проекта импортируются заново в изолированном окружении, чтобы не
@@ -86,6 +86,10 @@ def whisper_stub(monkeypatch):
 @pytest.fixture
 def project_modules(project, whisper_stub):
     """Импортирует модули проекта так, будто они запущены из `project`."""
+    # config остаётся в sys.modules (стабильная идентичность класса ConfigError),
+    # но кэш настроек чистим: иначе settings.SETTINGS указывал бы на CWD
+    # предыдущего теста.
+    importlib.import_module("config").reset_settings_cache()
     for name in PROJECT_MODULES:
         sys.modules.pop(name, None)
     yield {name: importlib.import_module(name) for name in PROJECT_MODULES}

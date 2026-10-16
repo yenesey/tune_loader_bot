@@ -28,7 +28,7 @@ Telegram-бот, который по ссылке скачивает аудио 
 | `bot.py` | Точка входа: aiogram-диспетчер, middleware доступа, FSM-диалог выбора формата, обработчики сообщений/постов канала, транскрипция, фоновый `watchdog` подписок |
 | `tune_loader_bot/media/` | `paths.py` (раскладка файлов, публичные ссылки), `ytdlp.py` (опции, загрузка, разбор плейлиста) |
 | `download.py` | Переходный фасад над медиа-слоем: `download_media()`, `download_playlist()` |
-| `tune_loader_bot/` | Пакет: `config.py`, `domain/models.py`, `storage/{db,migrations}.py`, `migrate.py` (CLI миграций) |
+| `tune_loader_bot/` | Пакет: `config.py`, `domain/{models,services}.py`, `media/`, `storage/{db,migrations}.py`, `migrate.py` (CLI миграций) |
 | `database.py` | Переходный dict-API хранилища (`Database`); внутри — `tune_loader_bot.storage` |
 | `settings.py` | Переходный dict-доступ к настройкам (`SETTINGS`); удаляется после фаз 3-6 |
 | `pyproject.toml` | Конфиг ruff и pytest (проект пока не сборочный пакет) |
@@ -107,9 +107,13 @@ journalctl/tail -f tune-loader-bot.log
 ## Известные особенности и подводные камни
 
 Актуальный список дефектов (D1-D25) и статус закрытия — в `REFACTORING_PLAN.md`
-(§1 и §8, там же колонка «Закрыт»). Закрыто в фазах 0-3: схема БД и миграции
+(§1 и §8, там же колонка «Закрыт»). Закрыто в фазах 0-4: схема БД и миграции
 (D1/D2/D8/D15), конфиг с валидацией (D17), тестовый контур и зависимости (D16),
-медиа-слой (D3/D4/D6/D20/D22/D23/D24).
+медиа-слой (D3/D4/D6/D20/D22/D23/D24), реестр сервисов (D10/D11).
+
+Знание о сервисах — только в `tune_loader_bot/domain/services.py` (домены,
+форматы, селекторы yt-dlp). Не дублировать регулярки и наборы форматов в
+обработчиках.
 
 Важно про yt-dlp: значения в `extractor_args` передаются **только списками**
 (`{"youtube": {"player_js_version": ["actual"]}}`) — строку yt-dlp разбирает по
@@ -121,8 +125,6 @@ journalctl/tail -f tune-loader-bot.log
   медленный, ~1.4 ГБ RSS (фаза 7).
 - `USER_DATA` — обычный dict в памяти: течёт, теряется при рестарте (callback →
   `KeyError`), не учитывает несколько чатов (фаза 5).
-- `create_download_dialog`: у `soundcloud`/`yandex`/`tiktok`/`instagram` значения —
-  строки вместо кортежей; regex'ы сервисов слабо заякорены (фаза 4).
 - Имя файла задаётся настройкой `filename-template` (по умолчанию
   `%(title).100s`): одноимённые видео затирают друг друга, пока владелец не
   включит вариант с `%(id)s` (D5).

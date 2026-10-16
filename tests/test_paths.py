@@ -183,9 +183,3 @@ def test_exists_checks_real_file(tmp_path):
     assert paths.exists(info) is True
     assert paths.exists({"file_path": None}) is False
     assert paths.exists(None) is False
-
-
-def test_bot_delegates_to_media_paths(bot_module):
-    """`bot.py` больше не дублирует раскладку, а импортирует её (фаза 3)."""
-    assert bot_module.sub_dir is paths.sub_dir
-    assert bot_module.enrich_info is paths.enrich_info

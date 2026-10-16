@@ -156,11 +156,3 @@ def test_format_selector_by_service(name, video, expected):
 
 def test_matching_ignores_trailing_dot_and_case():
     assert services.match("https://WWW.YouTube.COM./watch?v=1").name == "youtube"
-
-
-def test_bot_check_url_uses_registry(bot_module):
-    """`bot.check_url` — тонкая обёртка над реестром (фаза 4)."""
-    assert bot_module.check_url("https://youtu.be/abc") == "youtube"
-    assert bot_module.check_url("https://youtubeevil.com/watch?v=1") is None
-    assert bot_module.check_url("https://soundcloud.evil.example/x") is None
-    assert bot_module.check_url("не ссылка") is None

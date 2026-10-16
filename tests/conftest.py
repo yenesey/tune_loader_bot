@@ -90,6 +90,14 @@ def project(tmp_path, monkeypatch):
 
 
 @pytest.fixture
+def settings(project):
+    """Настройки из временного `settings.json` (кэш `config` сброшен)."""
+    config = importlib.import_module("tune_loader_bot.config")
+    config.reset_settings_cache()
+    return config.get_settings()
+
+
+@pytest.fixture
 def whisper_stub(monkeypatch):
     """Заглушка whisper: без torch и без загрузки модели (~1.4 ГБ)."""
     fake = types.ModuleType("whisper")

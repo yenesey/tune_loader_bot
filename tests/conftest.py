@@ -20,9 +20,9 @@ from pathlib import Path
 
 import pytest
 
-# Модули проекта, которые зависят от CWD (settings.json) и должны
-# переимпортироваться в каждом тесте.
-PROJECT_MODULES = ("settings", "download", "database", "bot")
+# Модуль точки входа: переимпортируется в каждом тесте, чтобы не «протекало»
+# состояние модуля (переходные settings/download/database удалены в фазе 8).
+PROJECT_MODULES = ("bot",)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LIVE_DB = REPO_ROOT / "downloads.db"
@@ -134,17 +134,6 @@ async def storage(tmp_path):
     instance = await storage_module.Storage.open(tmp_path / "test.db")
     yield instance
     await instance.close()
-
-
-@pytest.fixture
-async def legacy_db(project):
-    """Переходный dict-API `database.Database` (путь к базе берётся из настроек)."""
-    sys.modules.pop("database", None)
-    database = importlib.import_module("database")
-    instance = await database.Database.create()
-    yield instance
-    await instance.close()
-    sys.modules.pop("database", None)
 
 
 @pytest.fixture

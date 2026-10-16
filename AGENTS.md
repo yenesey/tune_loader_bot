@@ -18,18 +18,20 @@ Telegram-бот, который по ссылке скачивает аудио 
   (pytest, pytest-asyncio, pytest-cov, ruff), `requirements-whisper.txt`
   (openai-whisper + torch — тяжёлые, ставятся отдельно)
 - aiogram 3.x (long polling), aiosqlite, yt-dlp (+ yt-dlp-ejs, требует Deno)
-- openai-whisper + torch (ставятся отдельно: `requirements-whisper.txt`)
+- openai-whisper + torch — **опционально** (`requirements-whisper.txt`): без них
+  бот работает, а распознавание голосовых выключается
 - ffmpeg (используется постпроцессорами yt-dlp для конвертации в mp3/mp4)
 
 ## Файлы
 
 | Файл | Роль |
 |---|---|
-| `bot.py` | Тонкая точка входа: модель Whisper, адаптер транскрипции, watchdog подписок, запуск polling |
+| `bot.py` | Тонкая точка входа: сборка зависимостей (`build_runtime`), запуск polling и watchdog |
 | `tune_loader_bot/media/` | `paths.py` (раскладка файлов, публичные ссылки), `ytdlp.py` (опции, загрузка, разбор плейлиста) |
-| `tune_loader_bot/telegram/` | Тексты, клавиатура, подписи, доставка, обработчики, middleware, `create_dispatcher` |
+| `tune_loader_bot/telegram/` | Тексты, клавиатура, подписи, доставка, обработчики, голосовые, middleware, `create_dispatcher` |
 | `tune_loader_bot/library.py` | Медиатека: найти готовое или скачать и сохранить (прикладной слой) |
 | `tune_loader_bot/jobs/` | `watchdog.py` — фоновый обход подписок (`SubscriptionWatcher`) |
+| `tune_loader_bot/transcription/` | `whisper_service.py` — распознавание речи (ленивая загрузка модели) |
 | `download.py` | Переходный фасад над медиа-слоем; в рантайме уже не используется, удаляется в фазе 8 |
 | `tune_loader_bot/` | Пакет: `config.py`, `domain/{models,services}.py`, `media/`, `storage/{db,migrations}.py`, `migrate.py` (CLI миграций) |
 | `database.py` | Переходный dict-API хранилища (`Database`); внутри — `tune_loader_bot.storage` |
@@ -47,7 +49,8 @@ Telegram-бот, который по ссылке скачивает аудио 
 ## Как работает
 
 1. **Доступ.** `SecurityMiddleware` (outer middleware на `dp.update`) молча отбрасывает
-   апдейты от user_id, которых нет в `SETTINGS["users-list"]`.
+   апдейты от user_id, которых нет в `settings.users_list` (посты канала проходят:
+   у них нет `event_from_user`).
 2. **Личные сообщения**: `services.match()` определяет сервис, бот отвечает
    «Может качнем эту ☝ ссылку?» с кнопками Audio/Video (набор берётся из реестра).
    Ссылка и адрес сообщения сохраняются в FSM-данных, состояние — `DownloadDialog.select_action`.
@@ -68,8 +71,10 @@ Telegram-бот, который по ссылке скачивает аудио 
    (без учёта регистра, разделитель `,`, префикс `-` — исключение), скачивает новое как
    аудио и досылает недоставленное (`delivered=0`). `last_check` двигается **после**
    успешной проверки, ошибка одной подписки не мешает остальным.
-8. **Голосовые** (`voice`) — скачиваются во временный `.ogg`, распознаются Whisper'ом
-   (`model.transcribe(..., language="ru")`) в отдельном потоке, ответ — `message.reply`.
+8. **Голосовые**: `TelegramVoiceTranscriber` скачивает файл во временный каталог и
+   отдаёт `WhisperTranscriber` — модель грузится **при первом голосовом** (в потоке,
+   с `Semaphore(1)`), язык/модель из настроек, `whisper-enabled` выключает фичу,
+   а отсутствие пакета не роняет бота. Ответ — `message.reply`.
 9. **Запуск**: `python bot.py` из корня проекта (settings.json и downloads.db ищутся
    относительно CWD; путь к настройкам можно задать в `$TUNE_LOADER_SETTINGS`). Сейчас работает как `tune-loader-bot.service` от пользователя `denis`.
 
@@ -112,11 +117,11 @@ journalctl/tail -f tune-loader-bot.log
 ## Известные особенности и подводные камни
 
 Актуальный список дефектов (D1-D25) и статус закрытия — в `REFACTORING_PLAN.md`
-(§1 и §8, там же колонка «Закрыт»). Закрыто в фазах 0-6: схема БД и миграции
+(§1 и §8, там же колонка «Закрыт»). Закрыто в фазах 0-7: схема БД и миграции
 (D1/D2/D8/D15), конфиг с валидацией (D17), тестовый контур и зависимости (D16),
 медиа-слой (D3/D4/D6/D20/D22/D23/D24), реестр сервисов (D10/D11),
-telegram-слой (D9/D21), watchdog (D13); D19/D25 закрыты частично — graceful
-shutdown и настройка логов остаются в фазе 8.
+telegram-слой (D9/D21), watchdog (D13), транскрипция (D14); D19/D25 закрыты
+частично — graceful shutdown и настройка логов остаются в фазе 8.
 
 Знание о сервисах — только в `tune_loader_bot/domain/services.py` (домены,
 форматы, селекторы yt-dlp). Не дублировать регулярки и наборы форматов в
@@ -126,10 +131,8 @@ shutdown и настройка логов остаются в фазе 8.
 (`{"youtube": {"player_js_version": ["actual"]}}`) — строку yt-dlp разбирает по
 символам и пишет в лог `Invalid player JS version "a"`.
 
-Ещё не исправлено (фазы 7-8):
+Ещё не исправлено (фаза 8):
 
-- `whisper.load_model("turbo")` вызывается **на импорте** `bot.py`: старт
-  медленный, ~1.4 ГБ RSS (фаза 7).
 - Имя файла задаётся настройкой `filename-template` (по умолчанию
   `%(title).100s`): одноимённые видео затирают друг друга, пока владелец не
   включит вариант с `%(id)s` (D5).

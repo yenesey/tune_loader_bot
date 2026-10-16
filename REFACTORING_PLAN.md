@@ -599,4 +599,4 @@ Non-goals: смена СУБД, веб-интерфейс, изменение п
   и тик — из настроек (`watch-playlist-items`, `watch-tick-seconds`). Из `bot.py`
   убраны `watchdog()`/`scan_playlist()` (139 → 111 строк); `download.py` тоже
   стал переходным слоем без пользователей в рантайме · 307 passed, ruff clean,
-  живая БД без изменений · —
+  живая БД без изменений · коммит `d90e79a`, merge `0af1844`

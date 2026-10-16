@@ -1,0 +1,18 @@
+{
+  "name-sep": "—",
+  "telegram-api-token": "123456789:REPLACE_WITH_BOT_TOKEN",
+  "po-token-gvs": "",
+  "po-token-web": "",
+  "download-dir": "/var/www/media",
+  "server-root-url": "https://example.com/media",
+  "users-list": [111111111, 222222222],
+  "db-path": "downloads.db",
+  "cookies-file": "cookies.txt",
+  "max-concurrent-downloads": 2,
+  "tg-max-file-size": 52428800,
+  "watch-playlist-items": "1,2",
+  "whisper-enabled": true,
+  "whisper-model": "turbo",
+  "whisper-language": "ru",
+  "log-level": "INFO"
+}

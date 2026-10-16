@@ -26,10 +26,12 @@ Telegram-бот, который по ссылке скачивает аудио 
 | `bot.py` | Точка входа: aiogram-диспетчер, middleware доступа, FSM-диалог выбора формата, обработчики сообщений/постов канала, транскрипция, фоновый `watchdog` подписок |
 | `download.py` | Обёртка над yt-dlp: `download_media()` (один трек/видео) и `download_playlist()` (разбор плейлиста без скачивания) |
 | `database.py` | Singleton-обёртка над SQLite (`downloads.db`): `downloads` + `subscriptions` |
-| `settings.py` | Читает `settings.json` в глобальный `SETTINGS` |
+| `config.py` | Читает и валидирует `settings.json` (`Settings`, `get_settings()`); путь переопределяется `$TUNE_LOADER_SETTINGS` |
+| `settings.py` | Переходный dict-доступ к настройкам (`SETTINGS`); удаляется после фаз 3-6 |
 | `pyproject.toml` | Конфиг ruff и pytest (проект пока не сборочный пакет) |
 | `tests/` | pytest-тесты: герметичные (временный CWD), живая БД защищена guard'ом |
 | `REFACTORING_PLAN.md` | План рефакторинга, карта дефектов (D1-D25) и журнал прогресса |
+| `settings.example.json` | Образец настроек без секретов (в git) |
 | `settings.json` | **Секреты и пути** (в `.gitignore`): токен бота, po-token'ы YouTube, `download-dir`, `server-root-url`, `users-list` |
 | `cookies.txt` | Cookies для yt-dlp (в `.gitignore`) |
 | `downloads.db` | Живая база: 2065 записей о загрузках (в `.gitignore`) |
@@ -61,7 +63,7 @@ Telegram-бот, который по ссылке скачивает аудио 
 8. **Голосовые** (`voice`) — скачиваются во временный `.ogg`, распознаются Whisper'ом
    (`model.transcribe(..., language="ru")`) в отдельном потоке, ответ — `message.reply`.
 9. **Запуск**: `python bot.py` из корня проекта (settings.json и downloads.db ищутся
-   относительно CWD). Сейчас работает как `tune-loader-bot.service` от пользователя `denis`.
+   относительно CWD; путь к настройкам можно задать в `$TUNE_LOADER_SETTINGS`). Сейчас работает как `tune-loader-bot.service` от пользователя `denis`.
 
 ## Схема БД (`downloads.db`)
 
@@ -87,7 +89,7 @@ journalctl/tail -f tune-loader-bot.log
 ## Известные особенности и подводные камни
 
 - `whisper.load_model("turbo")` вызывается **на импорте** `bot.py`: старт медленный,
-  ~1.4 ГБ RSS (torch/whisper нет в requirements.txt).
+  ~1.4 ГБ RSS (torch/whisper ставятся отдельно: `requirements-whisper.txt`).
 - `YTDL_OPTS` — глобальный мутируемый dict: `download_media()` меняет `format`,
   `postprocessors`, `paths` при каждом вызове. Одновременные загрузки (пользователь +
   watchdog) могут перемешать настройки. Для плейлистов остаётся «последний» `format`.

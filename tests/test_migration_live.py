@@ -5,6 +5,7 @@
 идут на ней. Если живой базы нет (CI) — тесты пропускаются.
 """
 
+import sqlite3
 from pathlib import Path
 
 from conftest import read_rows
@@ -77,8 +78,23 @@ async def test_migration_of_live_snapshot_is_idempotent(live_db_snapshot):
 
 
 async def test_live_snapshot_migration_makes_backup(live_db_snapshot, tmp_path):
+    """Копия делается только когда схему действительно надо менять.
+
+    Живая база могла быть уже мигрирована (сервис поднимает миграции при старте),
+    поэтому тест проверяет оба случая — иначе он ломается после первого запуска
+    нового кода.
+    """
+    connection = sqlite3.connect(f"file:{live_db_snapshot}?mode=ro", uri=True)
+    try:
+        version_before = connection.execute("PRAGMA user_version").fetchone()[0]
+    finally:
+        connection.close()
+
     storage = await Storage.open(live_db_snapshot)
     await storage.close()
 
     backups = sorted(tmp_path.glob("downloads.db.*.bak"))
-    assert backups, "перед миграцией существующей базы должен создаваться бэкап"
+    if version_before == migrations.CURRENT_VERSION:
+        assert backups == [], "актуальная схема не требует ни миграции, ни копии"
+    else:
+        assert backups, "перед миграцией существующей базы должен создаваться бэкап"

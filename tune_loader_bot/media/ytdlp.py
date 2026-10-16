@@ -132,15 +132,39 @@ class MoveFilesHook:
             self.file_path = info.get("filepath") or info.get("_filename") or self.file_path
 
 
+def find_deno(settings: Settings, *, home: Path | None = None) -> str | None:
+    """Ищет JavaScript-рантайм Deno.
+
+    Порядок: настройка `deno-path` → `PATH` → стандартное место установки
+    `~/.deno/bin/deno`.
+
+    Последний шаг появился после регрессии 16.10.2026: старый код хардкодил
+    `/home/denis/.deno/bin/deno`, при переходе на «настройка или PATH» в
+    systemd-сервисе (у него минимальный `PATH`, а `bash -c ... activate` не
+    добавляет `~/.deno/bin`) Deno перестал находиться, и YouTube отвечал
+    «Requested format is not available» из-за нерешённой n-challenge.
+    """
+    if settings.deno_path:
+        return settings.deno_path
+
+    from_path = shutil.which("deno")
+    if from_path:
+        return from_path
+
+    base = Path(home) if home is not None else Path.home()
+    fallback = base / ".deno" / "bin" / "deno"
+    return str(fallback) if fallback.is_file() else None
+
+
 def _js_runtimes(settings: Settings) -> dict[str, Any]:
-    deno = settings.deno_path or shutil.which("deno")
+    deno = find_deno(settings)
     if not deno:
         LOGGER.warning(
-            "Deno не найден (%s не задан и нет в PATH): часть форматов YouTube "
-            "может не расшифровываться",
-            "deno-path",
+            "Deno не найден (искали 'deno-path', PATH и ~/.deno/bin/deno): "
+            "часть форматов YouTube может не расшифровываться"
         )
         return {}
+    LOGGER.debug("JavaScript-рантайм: %s", deno)
     return {"deno": {"path": deno}}
 
 

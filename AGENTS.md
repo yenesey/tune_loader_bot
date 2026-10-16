@@ -113,7 +113,7 @@ journalctl/tail -f tune-loader-bot.log
 ```
 
 Требуется `settings.json` в CWD, `cookies.txt` для YouTube и Deno
-(путь задаётся настройкой `deno-path`, иначе ищется в `PATH`).
+(`deno-path` → `PATH` → `~/.deno/bin/deno`).
 Миграции базы — `.venv/bin/python -m tune_loader_bot.migrate --report|--check|--apply`.
 
 ## Известные особенности и подводные камни
@@ -129,6 +129,12 @@ journalctl/tail -f tune-loader-bot.log
 Важно про yt-dlp: значения в `extractor_args` передаются **только списками**
 (`{"youtube": {"player_js_version": ["actual"]}}`) — строку yt-dlp разбирает по
 символам и пишет в лог `Invalid player JS version "a"`.
+
+Deno ищется в порядке `deno-path` → `PATH` → `~/.deno/bin/deno`. Под systemd
+`PATH` минимальный (`~/.deno/bin` в него не входит), поэтому без настройки
+`deno-path` работает только третий шаг — на нём YouTube и держится (регрессия
+16.10.2026: без JS-рантайма yt-dlp не решает n-challenge и пишет
+`Requested format is not available`).
 
 Осталось решить владельцу:
 

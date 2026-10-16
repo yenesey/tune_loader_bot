@@ -153,16 +153,46 @@ def test_deno_path_from_settings(settings):
     assert options["js_runtimes"] == {"deno": {"path": "/usr/local/bin/deno"}}
 
 
-def test_deno_path_falls_back_to_path_lookup(monkeypatch, settings, caplog):
+def test_deno_path_falls_back_to_path_lookup(monkeypatch, settings, tmp_path):
+    no_deno_path = make_settings(**{"deno-path": None})
     monkeypatch.setattr(ytdlp.shutil, "which", lambda name: "/found/deno")
 
-    from_path = ytdlp.build_options(make_settings(**{"deno-path": None}), "/tmp/target")
+    from_path = ytdlp.build_options(no_deno_path, "/tmp/target")
     assert from_path["js_runtimes"] == {"deno": {"path": "/found/deno"}}
 
+    # ни настройки, ни PATH: стандартного места установки нет
     monkeypatch.setattr(ytdlp.shutil, "which", lambda name: None)
-    without_deno = ytdlp.build_options(make_settings(**{"deno-path": None}), "/tmp/target")
+    monkeypatch.setattr(ytdlp.Path, "home", classmethod(lambda cls: tmp_path))
+    without_deno = ytdlp.build_options(no_deno_path, "/tmp/target")
     assert "js_runtimes" not in without_deno
-    assert "Deno" in caplog.text
+
+
+def test_deno_is_taken_from_settings_first(monkeypatch, settings):
+    monkeypatch.setattr(ytdlp.shutil, "which", lambda name: "/from/path/deno")
+
+    assert ytdlp.find_deno(settings) == settings.deno_path
+
+
+def test_deno_found_in_default_home_location(monkeypatch, tmp_path):
+    """Регрессия 16.10.2026: в systemd нет ~/.deno/bin в PATH."""
+    deno = tmp_path / ".deno" / "bin" / "deno"
+    deno.parent.mkdir(parents=True)
+    deno.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(ytdlp.shutil, "which", lambda name: None)
+
+    settings = make_settings(**{"deno-path": None})
+    assert ytdlp.find_deno(settings, home=tmp_path) == str(deno)
+
+
+def test_deno_missing_everywhere_warns(monkeypatch, settings, tmp_path, caplog):
+    monkeypatch.setattr(ytdlp.shutil, "which", lambda name: None)
+    monkeypatch.setattr(ytdlp.Path, "home", classmethod(lambda cls: tmp_path))
+
+    with caplog.at_level("WARNING"):
+        options = ytdlp.build_options(make_settings(**{"deno-path": None}), "/tmp/target")
+
+    assert "js_runtimes" not in options
+    assert "Deno не найден" in caplog.text
 
 
 def test_retries_and_timeout_are_set(settings):

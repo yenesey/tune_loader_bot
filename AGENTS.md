@@ -5,13 +5,18 @@ Telegram-бот, который по ссылке скачивает аудио 
 автоматически следить за YouTube-плейлистами/каналами по подпискам. Дополнительно
 расшифровывает голосовые сообщения в текст (OpenAI Whisper).
 
-Проект небольшой и плоский: 4 python-модуля в корне, без пакета и без тестов.
+Проект небольшой и плоский: 4 python-модуля в корне, без пакета; есть тесты
+(pytest) и линт (ruff). Идёт поэтапный рефакторинг — план, карта дефектов и
+учёт прогресса в `REFACTORING_PLAN.md` (статус фаз — §8).
 
 ## Стек
 
-- Python 3.13 (`.venv/` в корне, зависимости — `requirements.txt`)
+- Python 3.13 (`.venv/` в корне)
+- Зависимости разделены: `requirements.txt` (рантайм), `requirements-dev.txt`
+  (pytest, pytest-asyncio, pytest-cov, ruff), `requirements-whisper.txt`
+  (openai-whisper + torch — тяжёлые, ставятся отдельно)
 - aiogram 3.x (long polling), aiosqlite, yt-dlp (+ yt-dlp-ejs, требует Deno)
-- openai-whisper + torch (установлены в `.venv`, но **в `requirements.txt` их нет**)
+- openai-whisper + torch (ставятся отдельно: `requirements-whisper.txt`)
 - ffmpeg (используется постпроцессорами yt-dlp для конвертации в mp3/mp4)
 
 ## Файлы
@@ -22,9 +27,12 @@ Telegram-бот, который по ссылке скачивает аудио 
 | `download.py` | Обёртка над yt-dlp: `download_media()` (один трек/видео) и `download_playlist()` (разбор плейлиста без скачивания) |
 | `database.py` | Singleton-обёртка над SQLite (`downloads.db`): `downloads` + `subscriptions` |
 | `settings.py` | Читает `settings.json` в глобальный `SETTINGS` |
+| `pyproject.toml` | Конфиг ruff и pytest (проект пока не сборочный пакет) |
+| `tests/` | pytest-тесты: герметичные (временный CWD), живая БД защищена guard'ом |
+| `REFACTORING_PLAN.md` | План рефакторинга, карта дефектов (D1-D25) и журнал прогресса |
 | `settings.json` | **Секреты и пути** (в `.gitignore`): токен бота, po-token'ы YouTube, `download-dir`, `server-root-url`, `users-list` |
 | `cookies.txt` | Cookies для yt-dlp (в `.gitignore`) |
-| `downloads.db` | Живая база: ~2055 записей о загрузках (в `.gitignore`) |
+| `downloads.db` | Живая база: 2065 записей о загрузках (в `.gitignore`) |
 | `install-service-systemd.sh` | Установка/переустановка systemd-юнита `tune-loader-bot.service` |
 | `tune-loader-bot.log` | Симлинк на `/var/log/tune-loader-bot.log` |
 
@@ -106,6 +114,10 @@ journalctl/tail -f tune-loader-bot.log
   без новых зависимостей без необходимости.
 - Любые изменения схемы БД делать миграцией `IF NOT EXISTS` в `Database.create()` —
   база живая, содержит реальные данные.
-- Тестов нет; проверка — запуск `python bot.py` и логи. Сервис в бою под systemd,
+- Тесты и линт: `.venv/bin/python -m pytest`, `.venv/bin/ruff check .`. Тесты
+  обязаны работать в `tmp_path`: `database.py` открывает `downloads.db`
+  относительно CWD, а в `tests/conftest.py` стоит guard, который роняет тест при
+  изменении живой БД. Живая БД — реальные данные, писать в неё из тестов нельзя.
+- Проверка в бою — запуск `python bot.py` и логи. Сервис под systemd,
   не перезапускать его без явной просьбы.
 - `AGENTS.md` — краткое описание, обновлять при изменениях архитектуры.

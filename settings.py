@@ -14,5 +14,5 @@ Example SETTINGS:
 '''
 SETTINGS = json.load( open('settings.json') )
 
-if not "name-sep" in SETTINGS:
+if "name-sep" not in SETTINGS:
     SETTINGS["name-sep"] = "—"

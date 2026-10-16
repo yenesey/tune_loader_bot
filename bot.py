@@ -3,17 +3,14 @@ import asyncio
 import logging
 import os
 import re
-
+import tempfile
 import traceback
 import urllib.parse
 from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Dict
 
 import whisper
-import tempfile
-
 from aiogram import Bot, Dispatcher  # , Router
-from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.client.default import DefaultBotProperties
 from aiogram.dispatcher.middlewares.base import BaseMiddleware
 from aiogram.filters import StateFilter

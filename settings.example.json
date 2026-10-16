@@ -12,6 +12,7 @@
   "max-concurrent-downloads": 2,
   "tg-max-file-size": 52428800,
   "watch-playlist-items": "1,2",
+  "watch-tick-seconds": 60,
   "whisper-enabled": true,
   "whisper-model": "turbo",
   "whisper-language": "ru",

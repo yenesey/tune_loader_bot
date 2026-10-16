@@ -5,8 +5,13 @@
 это будет видно здесь, а не в бою.
 """
 
+from datetime import datetime
 from pathlib import Path
 
+from fakes import FakeBot
+
+from tune_loader_bot.domain.models import Subscription
+from tune_loader_bot.jobs.watchdog import SubscriptionWatcher
 from tune_loader_bot.library import MediaLibrary
 from tune_loader_bot.storage.db import Storage
 from tune_loader_bot.telegram.delivery import Delivery
@@ -35,6 +40,21 @@ async def test_runtime_dispatcher_uses_same_context(bot_module, settings):
         dispatcher = create_dispatcher(ctx)
         assert ctx.transcriber is not None
         assert len(dispatcher.sub_routers) == 1
+    finally:
+        await storage.close()
+
+
+async def test_watcher_is_built_from_context(bot_module, settings):
+    """Watchdog собирается из тех же зависимостей, что и обработчики (как в `main`)."""
+    ctx, storage = await bot_module.build_runtime(settings)
+    try:
+        watcher = SubscriptionWatcher(
+            bot=FakeBot(),
+            library=ctx.library,
+            delivery=ctx.delivery,
+            settings=settings,
+        )
+        assert watcher.is_due(Subscription(url="u"), datetime.now()) is True
     finally:
         await storage.close()
 

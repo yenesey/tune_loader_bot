@@ -56,6 +56,9 @@ class Settings(BaseModel):
     # --- новые ключи (значения по умолчанию = текущее поведение кода) ---
     db_path: str = Field(default="downloads.db", alias="db-path")
     cookies_file: str = Field(default="cookies.txt", alias="cookies-file")
+    #: Шаблон имени файла для yt-dlp. `%(id)s` отключает затирание одноимённых
+    #: видео (D5), но меняет имена новых файлов — решение владельца.
+    filename_template: str = Field(default="%(title).100s", alias="filename-template")
     deno_path: str | None = Field(default=None, alias="deno-path")
     max_concurrent_downloads: int = Field(default=2, ge=1, alias="max-concurrent-downloads")
     tg_max_file_size: int = Field(default=DEFAULT_TG_MAX_FILE_SIZE, ge=1, alias="tg-max-file-size")

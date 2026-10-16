@@ -73,33 +73,33 @@
 Severity: **C** — ломает данные/прод, **H** — заметный баг, **M** — хрупкость,
 **L** — стиль/эксплуатация.
 
-| # | Sev | Проблема | Где |
-|---|---|---|---|
-| D1 | C | `CREATE TABLE downloads` не содержит `artist`, `channel`, `delivered`, а `save_download`/`find_url` их используют → на **чистой** БД всё падает (`no such column`). Схема живёт только потому, что колонки добавлены руками (подтверждено `PRAGMA table_info` живой БД) | `database.py:33-41` vs `57-64, 67-91` |
-| D2 | M | Уникальность `(url, video, user_id)` не действует для строк с `user_id IS NULL` (в SQLite NULL-ы различны; в живой БД таких строк **95 из 2065** — посты канала). Дублей сейчас нет только потому, что `process_message` всегда ищет запись перед вставкой; любой новый путь записи (или её обход) их создаст. Тип `user_id` не консистентен (`str()` в ЛС, `int` из подписки), но в данных это не проявилось: колонка `STRING` имеет NUMERIC-affinity и приводит текст к числу | `database.py:37`, `bot.py:131, 343` |
-| D3 | C | Глобальный мутируемый `YTDL_OPTS`: `format`, `postprocessors`, `paths`, `playlist_items` переписываются на каждый вызов → одновременные загрузки (пользователь + watchdog) перемешивают настройки | `download.py:11-42, 73-89, 102` |
-| D4 | H | `extractor_args` собран неправильно (см. §0): `player_client`, `youtube_player_js_*` не действуют; po-token'ы вложены верно, но эффект частичный | `download.py:13-24` |
-| D5 | H | `outtmpl = "%(title).100s"` + `overwrites: True`: два разных видео с одинаковым названием **затирают** друг друга, а в БД обе записи указывают на один файл | `download.py:34, 38, 60-68` |
-| D6 | H | Хук `MoveFiles`: `os.path.getsize(filepath)` без проверки существования, `os.path.basename(info.get("filepath"))` при `None` → исключение внутри хука, `result = None`, `file_size = None`; далее `result["file_size"] < TG_MAX_FILE_SIZE` → `TypeError`. Латентно: в живой БД `file_size IS NULL` — 0 строк | `download.py:58-69`, `bot.py:136` |
-| D7 | H | `find_url(url, video)` без `user_id` возвращает произвольную строку (первую по индексу) → чужой `delivered`/метаданные, «кэш» не привязан к пользователю. Файл на диске не проверяется, хотя каталог ~93 ГБ и чистится | `database.py:67-91`, `bot.py:100-104` |
-| D8 | H | `ON CONFLICT ... DO UPDATE SET delivered = excluded.delivered` — повторная загрузка не обновляет `file_size`/`title`/`artist`/`channel`/`date`, `None`-размер остаётся навсегда (латентно: в живой БД таких строк 0) | `database.py:61-62` |
-| D9 | M | `USER_DATA` — обычный dict с объектами `Message`: течёт, теряется при рестарте (callback → `KeyError`), не учитывает несколько чатов на пользователя | `bot.py:43, 224, 234` |
-| D10 | M | `create_download_dialog`: `("audio")` — это строка, а не кортеж, поэтому `btn in options[key]` работает как поиск подстроки; набор форматов и параметры yt-dlp описаны в двух несвязанных местах | `bot.py:186-210`, `download.py:86-89` |
-| D11 | M | `check_url`: незаэкранированные точки (`www.`, `.be/`), необязательный префикс `youtu(?:...)?` → совпадёт `https://youtubeevil.com/...`; нет нормализации хоста/регистра; rutube/coub/instagram — сложные regex без тестов | `bot.py:163-182` |
-| D12 | M | `datetime.strptime(..., "%Y-%m-%d %H:%M:%S.%f")` без fallback: строка без микросекунд (или записанная другим инструментом) валит весь тик watchdog; `find_url` режет `fetch[0][:10]`; `datetime.now()` без tz | `database.py:81, 105`, `bot.py:323-326` |
-| D13 | M | watchdog: один `try` на весь цикл, `last_check` сохраняется **до** работы (после ошибки подписка «считается проверенной»), `playlist_items` захардкожен `"1,2"`, фильтр ключевых слов — подстрока с учётом регистра, `DB` берётся из глобала, хотя передан параметром | `bot.py:302-347` |
-| D14 | M | `whisper.load_model("turbo")` на импорте: +1.4 ГБ RSS и медленный старт, даже если голосовые не используются; нет ограничения параллельных транскрипций; `file` может быть не определён; язык захардкожен | `bot.py:46, 251-278` |
-| D15 | M | Singleton `Database` с `_conn: aiosqlite.Connection` как заглушкой класса, путь `"downloads.db"` захардкожен относительно CWD, нет `close()`, нет `WAL`/`busy_timeout`, `create()` можно вызвать повторно и потерять соединение | `database.py:7-45` |
-| D16 | M | `requirements.txt` — полный freeze с транзитивными зависимостями, без whisper/torch и без dev-зависимостей; расходится с venv: yt-dlp 2026.3.17 vs 2026.8.19, aiosqlite 0.22.1 vs 0.21.0 | `requirements.txt` |
-| D17 | M | `settings.py`: `json.load(open('settings.json'))` на импорте, без валидации и внятной ошибки, путь зависит от CWD | `settings.py:15-18` |
-| D18 | L | systemd: `StandardOutput=file:` **обрезает лог** при каждом рестарте, `Description=Torrent Manager Bot`, `SyslogIdentifier=torrent-manager-bot`, запуск через `bash -c "source .venv/bin/activate"` | `install-service-systemd.sh:51,55,56,65` |
-| D19 | L | Нет graceful shutdown: БД не закрывается, watchdog-задача не отменяется; middleware регистрируется только под `__main__`, поэтому тестируемый `dp` не равен боевому | `bot.py:350-366` |
-| D20 | L | `enrich_info` мутирует входной dict, молча возвращает `None`, склеивает путь f-строкой; `sub_dir`/`server_url` — единственное место, где живёт правило раскладки файлов | `bot.py:75-97` |
-| D21 | L | Логика доставки продублирована: `process_message` (edit_media) и `send_audio_message` (send_audio) строят одинаковые подписи `hlink("#origin")/#file` | `bot.py:124-159, 280-299` |
-| D22 | L | Захардкоженный путь к Deno и `cookies.txt` относительно `os.getcwd()` на импорте | `download.py:25-26` |
-| D23 | L | Нет `noplaylist` для одиночной ссылки: вставленный URL плейлиста/канала уедет в веерную загрузку | `download.py:91-94` |
-| D24 | L | `download_playlist` возвращает `info["entries"]` без проверки `info`/`entries` → `None` превращается в `TypeError` в `scan_playlist` | `download.py:101-106`, `bot.py:302-312` |
-| D25 | L | Логирование настраивается только в `__main__`; `logging.error(traceback.format_exc())` вместо `logging.exception`; `SecurityMiddleware` печатает `data.keys()` (шум + приватность) | `bot.py:68-69, 158, 347, 360-364` |
+| # | Sev | Проблема | Где | Закрыт |
+|---|---|---|---|---|
+| D1 | C | `CREATE TABLE downloads` не содержит `artist`, `channel`, `delivered`, а `save_download`/`find_url` их используют → на **чистой** БД всё падает (`no such column`). Схема живёт только потому, что колонки добавлены руками (подтверждено `PRAGMA table_info` живой БД) | `database.py:33-41` vs `57-64, 67-91` ✅ 2 |
+| D2 | M | Уникальность `(url, video, user_id)` не действует для строк с `user_id IS NULL` (в SQLite NULL-ы различны; в живой БД таких строк **95 из 2065** — посты канала). Дублей сейчас нет только потому, что `process_message` всегда ищет запись перед вставкой; любой новый путь записи (или её обход) их создаст. Тип `user_id` не консистентен (`str()` в ЛС, `int` из подписки), но в данных это не проявилось: колонка `STRING` имеет NUMERIC-affinity и приводит текст к числу | `database.py:37`, `bot.py:131, 343` ✅ 2 |
+| D3 | C | Глобальный мутируемый `YTDL_OPTS`: `format`, `postprocessors`, `paths`, `playlist_items` переписываются на каждый вызов → одновременные загрузки (пользователь + watchdog) перемешивают настройки | `download.py:11-42, 73-89, 102` ✅ 3 |
+| D4 | H | `extractor_args` собран неправильно (см. §0): `player_client`, `youtube_player_js_*` не действуют; po-token'ы вложены верно, но эффект частичный | `download.py:13-24` ✅ 3 |
+| D5 | H | `outtmpl = "%(title).100s"` + `overwrites: True`: два разных видео с одинаковым названием **затирают** друг друга, а в БД обе записи указывают на один файл; имя вынесено в настройку `filename-template` (по умолчанию прежнее поведение, вариант с `%(id)s` — решение владельца) | `download.py:34, 38, 60-68` ◐ 3 |
+| D6 | H | Хук `MoveFiles`: `os.path.getsize(filepath)` без проверки существования, `os.path.basename(info.get("filepath"))` при `None` → исключение внутри хука, `result = None`, `file_size = None`; далее `result["file_size"] < TG_MAX_FILE_SIZE` → `TypeError`. Латентно: в живой БД `file_size IS NULL` — 0 строк | `download.py:58-69`, `bot.py:136` ✅ 3 |
+| D7 | H | `find_url(url, video)` без `user_id` возвращает произвольную строку (первую по индексу) → чужой `delivered`/метаданные, «кэш» не привязан к пользователю. Файл на диске не проверяется, хотя каталог ~93 ГБ и чистится | `database.py:67-91`, `bot.py:100-104` ◐ 2 |
+| D8 | H | `ON CONFLICT ... DO UPDATE SET delivered = excluded.delivered` — повторная загрузка не обновляет `file_size`/`title`/`artist`/`channel`/`date`, `None`-размер остаётся навсегда (латентно: в живой БД таких строк 0) | `database.py:61-62` ✅ 2 |
+| D9 | M | `USER_DATA` — обычный dict с объектами `Message`: течёт, теряется при рестарте (callback → `KeyError`), не учитывает несколько чатов на пользователя | `bot.py:43, 224, 234` — |
+| D10 | M | `create_download_dialog`: `("audio")` — это строка, а не кортеж, поэтому `btn in options[key]` работает как поиск подстроки; набор форматов и параметры yt-dlp описаны в двух несвязанных местах | `bot.py:186-210`, `download.py:86-89` — |
+| D11 | M | `check_url`: незаэкранированные точки (`www.`, `.be/`), необязательный префикс `youtu(?:...)?` → совпадёт `https://youtubeevil.com/...`; нет нормализации хоста/регистра; rutube/coub/instagram — сложные regex без тестов | `bot.py:163-182` — |
+| D12 | M | `datetime.strptime(..., "%Y-%m-%d %H:%M:%S.%f")` без fallback: строка без микросекунд (или записанная другим инструментом) валит весь тик watchdog; `find_url` режет `fetch[0][:10]`; `datetime.now()` без tz | `database.py:81, 105`, `bot.py:323-326` ✅ 2 |
+| D13 | M | watchdog: один `try` на весь цикл, `last_check` сохраняется **до** работы (после ошибки подписка «считается проверенной»), `playlist_items` захардкожен `"1,2"`, фильтр ключевых слов — подстрока с учётом регистра, `DB` берётся из глобала, хотя передан параметром | `bot.py:302-347` — |
+| D14 | M | `whisper.load_model("turbo")` на импорте: +1.4 ГБ RSS и медленный старт, даже если голосовые не используются; нет ограничения параллельных транскрипций; `file` может быть не определён; язык захардкожен | `bot.py:46, 251-278` — |
+| D15 | M | Singleton `Database` с `_conn: aiosqlite.Connection` как заглушкой класса, путь `"downloads.db"` захардкожен относительно CWD, нет `close()`, нет `WAL`/`busy_timeout`, `create()` можно вызвать повторно и потерять соединение | `database.py:7-45` ✅ 2 |
+| D16 | M | `requirements.txt` — полный freeze с транзитивными зависимостями, без whisper/torch и без dev-зависимостей; расходится с venv: yt-dlp 2026.3.17 vs 2026.8.19, aiosqlite 0.22.1 vs 0.21.0 | `requirements.txt` ✅ 0 |
+| D17 | M | `settings.py`: `json.load(open('settings.json'))` на импорте, без валидации и внятной ошибки, путь зависит от CWD | `settings.py:15-18` ✅ 1 |
+| D18 | L | systemd: `StandardOutput=file:` **обрезает лог** при каждом рестарте, `Description=Torrent Manager Bot`, `SyslogIdentifier=torrent-manager-bot`, запуск через `bash -c "source .venv/bin/activate"` | `install-service-systemd.sh:51,55,56,65` — |
+| D19 | L | Нет graceful shutdown: БД не закрывается, watchdog-задача не отменяется; middleware регистрируется только под `__main__`, поэтому тестируемый `dp` не равен боевому | `bot.py:350-366` — |
+| D20 | L | `enrich_info` мутирует входной dict, молча возвращает `None`, склеивает путь f-строкой; `sub_dir`/`server_url` — единственное место, где живёт правило раскладки файлов | `bot.py:75-97` ✅ 3 |
+| D21 | L | Логика доставки продублирована: `process_message` (edit_media) и `send_audio_message` (send_audio) строят одинаковые подписи `hlink("#origin")/#file` | `bot.py:124-159, 280-299` — |
+| D22 | L | Захардкоженный путь к Deno и `cookies.txt` относительно `os.getcwd()` на импорте | `download.py:25-26` ✅ 3 |
+| D23 | L | Нет `noplaylist` для одиночной ссылки: вставленный URL плейлиста/канала уедет в веерную загрузку | `download.py:91-94` ✅ 3 |
+| D24 | L | `download_playlist` возвращает `info["entries"]` без проверки `info`/`entries` → `None` превращается в `TypeError` в `scan_playlist` | `download.py:101-106`, `bot.py:302-312` ✅ 3 |
+| D25 | L | Логирование настраивается только в `__main__`; `logging.error(traceback.format_exc())` вместо `logging.exception`; `SecurityMiddleware` печатает `data.keys()` (шум + приватность) | `bot.py:68-69, 158, 347, 360-364` — |
 
 ---
 
@@ -492,7 +492,7 @@ Non-goals: смена СУБД, веб-интерфейс, изменение п
 | 0. Страховка (git, pyproject, requirements, характеризационные тесты) | ✅ | `refactor/phase-0` | 55 тестов, ruff clean, живая БД не тронута | 2026-10-16 |
 | 1. Конфиг (Settings, валидация, env) | ✅ | `refactor/phase-1` | 70 тестов, ruff clean, живой settings.json валиден | 2026-10-16 |
 | 2. Хранилище и миграции | 🟡 | `refactor/phase-2` | 115 тестов; миграция прогнана на копии живой БД (2065 записей, integrity ok); сама живая БД ждёт окна | 2026-10-16 |
-| 3. Медиа-слой / yt-dlp | ⬜ | — | — | — |
+| 3. Медиа-слой / yt-dlp | ✅ | `refactor/phase-3` | 159 тестов, ruff clean; опции и скачивание проверены на живом yt-dlp (mp3 4.9 МБ в /tmp) | 2026-10-16 |
 | 4. Реестр сервисов | ⬜ | — | — | — |
 | 5. Telegram-слой | ⬜ | — | — | — |
 | 6. Watchdog | ⬜ | — | — | — |
@@ -508,36 +508,42 @@ Non-goals: смена СУБД, веб-интерфейс, изменение п
 
 - 2026-10-16 · — · подготовлен план рефакторинга (без правок кода) · `git diff`
   пуст, план добавлен файлом `REFACTORING_PLAN.md` · коммит `3e1ba97`
-- 2026-10-16 · — · сверены окружение и живая БД (python 3.13.5, pytest нет,
-  дрейф requirements, `user_version=0`, 2065 строк, 95 `NULL` user_id, дублей и
-  `NULL`-размеров нет); план уточнён по фактам, вопрос про sandbox снят ·
-  read-only запросы к `downloads.db`, `.venv/bin/pip list`, `git status` · —
+- 2026-10-16 · — · сверены окружение и живая БД: python 3.13.5, pytest в venv нет,
+  дрейф requirements (yt-dlp, aiosqlite), `user_version=0`, 2065 записей,
+  95 `NULL user_id`, дублей и `NULL`-размеров нет; вопрос про sandbox снят ·
+  read-only запросы к `downloads.db`, `.venv/bin/pip list`, `git status` ·
+  коммит `03a4dcf`
 - 2026-10-16 · 0 · ⚠️ инцидент: первый прогон тестов не был изолирован по CWD и
   записал в живую БД 1 строку в `downloads` и 1 в `subscriptions`; замечено
-  сразу, сделан бэкап `downloads.db.damage-20261016-183155.bak`, мусор удалён по
+  сразу, бэкап `downloads.db.damage-20261016-183155.bak`, мусор удалён по
   содержимому строк, реальные подписки (id 2 `@etozbignev`, id 4 `@SuperSharij`)
-  не пострадали, счётчики восстановлены (2065 записей / 2 подписки) ·
-  проверка содержимым строк + read-only подсчёт после удаления · —
-- 2026-10-16 · 2 · фаза 2: появился пакет `tune_loader_bot/` (туда переехал
-  `config.py`), добавлены `domain/models.py`, `storage/db.py`,
-  `storage/migrations.py`, CLI `tune_loader_bot.migrate`; `database.py` стал
-  переходным dict-шимом над `Storage`. Закрыты D1 (схема с нуля поднимается),
-  D2 (`NULL` → 0, уникальность работает), D8 (upsert обновляет все поля),
-  D15 (никакого singleton'а, путь из настроек, `close()`, WAL/busy_timeout),
-  D12 (терпимый разбор меток времени). Тесты: характеризационные заменены на
-  проверки нового поведения + миграции (в т.ч. на копии живой БД) ·
-  115 passed, ruff clean, mtime/size живой БД без изменений, CLI-прогон на копии:
-  2065 → 2065 записей, 95 NULL → 0, delivered 683 сохранён, integrity ok ·
-  живая БД НЕ мигрирована (ждёт окна обслуживания) · коммит `001df3d`
-  (лёг напрямую в `develop` линейно, ветка `refactor/phase-2` указывает на него)
+  не пострадали, счётчики восстановлены (2065 / 2); в `tests/conftest.py` добавлен
+  guard, роняющий тест при изменении живой БД · проверка содержимым строк +
+  read-only подсчёт · —
+- 2026-10-16 · 0 · фаза 0: `pyproject.toml` (ruff + pytest + coverage),
+  requirements разделены на runtime/dev/whisper по факту venv, `.gitignore`
+  (+`.venv/`, WAL, кэши, бэкапы), характеризационные тесты · 55 passed, ruff
+  clean, mtime/size живой БД не изменились · коммит `bb55f0b`, merge `7caee17`
 - 2026-10-16 · 1 · фаза 1: `config.py` — `Settings` на pydantic (alias'ы старых
-  ключей, дефолты, `ConfigError` с понятным текстом, `$TUNE_LOADER_SETTINGS`),
-  `settings.py` стал переходным dict-шимом, добавлен `settings.example.json`,
-  15 тестов конфига; живой `settings.json` прогнан через валидацию (7 users,
-  po-token'ы заданы, legacy-доступ совпадает с моделью) · 70 passed, ruff clean,
-  mtime/size живой БД без изменений · —
-- 2026-10-16 · 0 · фаза 0: ветка `refactor/phase-0`; `pyproject.toml` (ruff +
-  pytest + coverage), requirements разделены на runtime/dev/whisper по факту
-  venv, `.gitignore` (+`.venv/`, WAL, кэши, бэкапы); характеризационные тесты
-  (paths/dialogs/check_url/БД) и guard, запрещающий писать в живую БД ·
-  55 passed, ruff clean, mtime/size живой БД не изменились, покрытие 38% (база) · —
+  ключей, дефолты, `ConfigError`, `$TUNE_LOADER_SETTINGS`), `settings.py` стал
+  dict-шимом, `settings.example.json`; живой `settings.json` прогнан валидацией
+  (7 users, po-token'ы заданы) · 70 passed, ruff clean · коммит `e251435`,
+  merge `a4dc969`
+- 2026-10-16 · 2 · фаза 2: пакет `tune_loader_bot/` (переехал `config.py`),
+  `domain/models.py`, `storage/db.py`, `storage/migrations.py`, CLI `migrate`;
+  `database.py` — dict-шим над `Storage`. Закрыты D1/D2/D8/D12/D15 · 115 passed,
+  ruff clean; CLI на копии живой БД: 2065 → 2065, 95 `NULL` → 0, `delivered` 683
+  сохранён, integrity ok · коммит `001df3d` (лёг в `develop` линейно, ветка
+  `refactor/phase-2` указывает на него)
+- 2026-10-16 · 2 · применение к живой БД: ожидает окна обслуживания (нужен sudo
+  на `systemctl`); `--check` на живой базе: 0 → 1, 95 `NULL` → 0, 2065 записей;
+  при любом рестарте сервиса миграция выполнится автоматически с бэкапом · —
+- 2026-10-16 · 3 · фаза 3: `media/paths.py` и `media/ytdlp.py`; `download.py` —
+  фасад над медиа-слоем, `bot.py` использует общие `sub_dir`/`enrich_info`.
+  Закрыты D3/D4/D6/D20/D22/D23/D24; D5 переведён в настройку `filename-template`.
+  Проверка на живом yt-dlp нашла ошибку вне тестов: значения `extractor_args`
+  обязаны быть списками, иначе yt-dlp разбирает строку по символам
+  (`Invalid player JS version "a"`) — исправлено, добавлен структурный тест.
+  Реальное скачивание через `download.download_media`: ExtractAudio → MoveFiles →
+  mp3 4.9 МБ в `/tmp` (удалён) · 159 passed, ruff clean, живая БД без изменений ·
+  —

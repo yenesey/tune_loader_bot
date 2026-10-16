@@ -5,7 +5,6 @@ import os
 import re
 import tempfile
 import traceback
-import urllib.parse
 from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Dict
 
@@ -35,6 +34,7 @@ from download import download_media, download_playlist
 
 # from watchdog import watchdog
 from settings import SETTINGS
+from tune_loader_bot.media.paths import enrich_info, sub_dir
 
 ######################################################################
 USER_DATA = {}
@@ -69,29 +69,8 @@ class SecurityMiddleware(BaseMiddleware):
 
 
 ##############################################################
-def sub_dir(on_date: datetime):
-    return os.path.join(
-        str(on_date.year), f"{str(on_date.year)}-{str(on_date.month).zfill(2)}"
-    )
-
-
-def enrich_info(info):
-    if not info or not isinstance(info, dict):
-        return None
-    info["performer"] = info["artist"] or info["channel"]
-    info["link_text"] = (
-        info["performer"] + " - " + info["title"]
-        if info["performer"]
-        else info["title"]
-    )
-    info["server_url"] = (
-        f"{SETTINGS['server-root-url']}/{sub_dir(info['date'])}/{urllib.parse.quote(info['file_name'])}"
-    )
-    if "file_path" not in info:
-        info["file_path"] = os.path.join(
-            f"{SETTINGS['download-dir']}/{sub_dir(info['date'])}", info["file_name"]
-        )
-    return info
+# `sub_dir`/`enrich_info` переехали в медиа-слой (фаза 3): правило раскладки
+# файлов и публичные ссылки живут в одном месте.
 
 
 async def find(url: str, video: bool) -> dict | None:

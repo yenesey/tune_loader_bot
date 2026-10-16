@@ -546,4 +546,4 @@ Non-goals: смена СУБД, веб-интерфейс, изменение п
   (`Invalid player JS version "a"`) — исправлено, добавлен структурный тест.
   Реальное скачивание через `download.download_media`: ExtractAudio → MoveFiles →
   mp3 4.9 МБ в `/tmp` (удалён) · 159 passed, ruff clean, живая БД без изменений ·
-  —
+  коммит `9763167`, merge `0d4ce43`

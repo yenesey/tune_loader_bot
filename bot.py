@@ -2,7 +2,6 @@
 import asyncio
 import logging
 import os
-import re
 import tempfile
 import traceback
 from datetime import datetime, timedelta
@@ -34,6 +33,7 @@ from download import download_media, download_playlist
 
 # from watchdog import watchdog
 from settings import SETTINGS
+from tune_loader_bot.domain import services
 from tune_loader_bot.media.paths import enrich_info, sub_dir
 
 ######################################################################
@@ -137,37 +137,14 @@ async def process_message(message: Message, video: bool):
 
 ##############################################################
 def check_url(url):
-    supported_urls = {
-        "youtube": re.compile(r"^https://(?:www.)?(?:music.)?youtu(?:.be/|be.com/)?"),
-        "soundcloud": re.compile(r"^https://(m|on)?.?soundcloud"),
-        "yandex": re.compile(r"^https?://music\.yandex\.(?P<tld>ru|kz|ua|by|com)"),
-        "rutube": re.compile(
-            r"^https?://rutube\.ru/(?:(?:live/)?video(?:/private)?|(?:play/)?embed)/(?P<id>[\da-z]{32})"
-        ),
-        "coub": re.compile(
-            r"^(?:coub:|https?://(?:coub\.com/(?:view|embed|coubs)/|c-cdn\.coub\.com/fb-player\.swf\?.*\bcoub(?:ID|id)=))(?P<id>[\da-z]+)"
-        ),
-        "tiktok": re.compile(r"^https://(?:www.)?(?:vt.)?tiktok.com/"),
-        "instagram": re.compile(
-            r"(?P<url>https?://(?:www\.)?instagram\.com(?:/(?!share/)[^/?#]+)?/(?:p|tv|reels?(?!/audio/))/(?P<id>[^/?#&]+))"
-        ),
-    }
-    for key in supported_urls:
-        if supported_urls[key].search(url):
-            return key
-    return None
+    """Имя сервиса по ссылке (или `None`). Знание о сервисах — в реестре (фаза 4)."""
+    service = services.match(url)
+    return service.name if service else None
 
 
 def create_download_dialog(key) -> dict:
-    options = {
-        "youtube": ("audio", "video"),
-        "soundcloud": ("audio"),
-        "yandex": ("audio"),
-        "rutube": ("audio", "video"),
-        "coub": ("audio", "video"),
-        "tiktok": ("video"),
-        "instagram": ("video"),
-    }
+    # KeyError на неизвестном сервисе: вызывающий обязан сначала проверить check_url
+    available = services.formats(key)
 
     buttons = {
         "audio": ("🎶Audio", "audio"),
@@ -175,9 +152,7 @@ def create_download_dialog(key) -> dict:
     }
 
     kbd = InlineKeyboardBuilder()
-    text_and_data = [buttons[btn] for btn in buttons if btn in options[key]] + [
-        ("❌", "exit")
-    ]
+    text_and_data = [buttons[btn] for btn in available] + [("❌", "exit")]
     row_btns = (
         InlineKeyboardButton(text=text, callback_data=data)
         for text, data in text_and_data

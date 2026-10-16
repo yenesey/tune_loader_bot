@@ -35,6 +35,7 @@ from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
 from tune_loader_bot.config import Settings
+from tune_loader_bot.domain import services
 
 LOGGER = logging.getLogger(__name__)
 YTDL_LOGGER = logging.getLogger("yt-dlp")
@@ -175,13 +176,6 @@ def youtube_extractor_args(settings: Settings) -> dict[str, Any]:
     return {"youtube": youtube}
 
 
-def format_selector(service: str | None, video: bool) -> str:
-    """Селектор формата: у YouTube свои ограничения по высоте кадра."""
-    if service == "youtube":
-        return "(mp4,webm)[height<960]" if video else "bestaudio/best"
-    return "bestvideo*+bestaudio/best"
-
-
 def build_options(
     settings: Settings,
     target: str | os.PathLike[str],
@@ -235,7 +229,8 @@ def build_options(
         return options
 
     options["noplaylist"] = True  # D23
-    options["format"] = format_selector(service, video)
+    # Селектор формата — знание о сервисе, поэтому живёт в реестре (фаза 4).
+    options["format"] = services.format_selector(service, video)
     options["postprocessors"] = (
         [{"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}]
         if video

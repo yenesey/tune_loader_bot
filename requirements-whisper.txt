@@ -1,0 +1,6 @@
+# Тяжёлые опциональные зависимости транскрипции (openai-whisper тянет torch,
+# numpy, triton и CUDA-колёса — гигабайты). Ставить отдельно:
+#   .venv/bin/pip install -r requirements-whisper.txt
+# Без них бот обязан запускаться, а фича транскрипции — выключаться (фаза 7).
+openai-whisper==20250625
+torch==2.13.0

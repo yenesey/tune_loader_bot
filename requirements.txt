@@ -1,21 +1,7 @@
-aiosqlite==0.22.1
-aiofiles==25.1.0
+# Прямые зависимости рантайма (без транзитивных). Версии зафиксированы по факту
+# установленного в .venv: раньше файл был полным `pip freeze` и расходился с venv.
+# Тяжёлые зависимости транскрипции — в requirements-whisper.txt.
 aiogram==3.28.2
-aiohappyeyeballs==2.6.1
-aiohttp==3.13.3
-aiosignal==1.4.0
-annotated-types==0.7.0
-attrs==26.1.0
-certifi==2026.2.25
-frozenlist==1.8.0
-idna==3.11
-magic-filter==1.0.12
-multidict==6.7.1
-propcache==0.4.1
-pydantic==2.12.5
-pydantic_core==2.43.0
-typing-inspection==0.4.2
-typing_extensions==4.15.0
-yarl==1.23.0
-yt-dlp==2026.3.17
+aiosqlite==0.21.0
+yt-dlp==2026.8.19
 yt-dlp-ejs==0.8.0

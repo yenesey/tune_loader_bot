@@ -1,5 +1,16 @@
 __pycache__
+*.pyc
+.venv/
 settings.json*
 downloads.db
+downloads.db-wal
+downloads.db-shm
+downloads.db.*.bak
 cookies.txt
 tune-loader-bot.log
+*.log
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/

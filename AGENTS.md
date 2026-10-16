@@ -5,11 +5,10 @@ Telegram-бот, который по ссылке скачивает аудио 
 автоматически следить за YouTube-плейлистами/каналами по подпискам. Дополнительно
 расшифровывает голосовые сообщения в текст (OpenAI Whisper).
 
-Появляется пакет `tune_loader_bot/` (`config`, `domain`, `storage`, CLI миграций);
-легаси-модули в корне (`bot.py`, `download.py`, `database.py`, `settings.py`) пока
-остаются плоскими и заменяются по фазам. Есть тесты (pytest) и линт (ruff). Идёт
-поэтапный рефакторинг — план, карта дефектов и учёт прогресса в
-`REFACTORING_PLAN.md` (статус фаз — §8).
+Весь код — в пакете `tune_loader_bot/`; в корне остаётся только `bot.py` — шим на
+13 строк для systemd (`python bot.py` == `python -m tune_loader_bot`). Есть тесты
+(pytest, 324) и линт (ruff), CI на GitHub Actions. Поэтапный рефакторинг завершён
+(фазы 0-8): план, карта дефектов и журнал прогресса — в `REFACTORING_PLAN.md`.
 
 ## Стек
 
@@ -26,17 +25,16 @@ Telegram-бот, который по ссылке скачивает аудио 
 
 | Файл | Роль |
 |---|---|
-| `bot.py` | Тонкая точка входа: сборка зависимостей (`build_runtime`), запуск polling и watchdog |
+| `bot.py` | Шим для systemd: `python bot.py` → `tune_loader_bot.app:main` |
 | `tune_loader_bot/media/` | `paths.py` (раскладка файлов, публичные ссылки), `ytdlp.py` (опции, загрузка, разбор плейлиста) |
 | `tune_loader_bot/telegram/` | Тексты, клавиатура, подписи, доставка, обработчики, голосовые, middleware, `create_dispatcher` |
 | `tune_loader_bot/library.py` | Медиатека: найти готовое или скачать и сохранить (прикладной слой) |
 | `tune_loader_bot/jobs/` | `watchdog.py` — фоновый обход подписок (`SubscriptionWatcher`) |
 | `tune_loader_bot/transcription/` | `whisper_service.py` — распознавание речи (ленивая загрузка модели) |
-| `download.py` | Переходный фасад над медиа-слоем; в рантайме уже не используется, удаляется в фазе 8 |
-| `tune_loader_bot/` | Пакет: `config.py`, `domain/{models,services}.py`, `media/`, `storage/{db,migrations}.py`, `migrate.py` (CLI миграций) |
-| `database.py` | Переходный dict-API хранилища (`Database`); внутри — `tune_loader_bot.storage` |
-| `settings.py` | Переходный dict-доступ к настройкам; в рантайме уже не используется, удаляется в фазе 8 |
-| `pyproject.toml` | Конфиг ruff и pytest (проект пока не сборочный пакет) |
+| `tune_loader_bot/` | Пакет: `app.py` (композиция), `__main__.py`, `config.py`, `logging_setup.py`, `library.py`, `migrate.py` и подпакеты `domain/`, `media/`, `storage/`, `telegram/`, `jobs/`, `transcription/` |
+| `pyproject.toml` | Конфиг ruff, pytest и coverage (проект запускается из корня, без установки пакета) |
+| `.github/workflows/ci.yml` | CI: `ruff check` + `pytest` с порогом покрытия 85% |
+| `README.md` | Описание проекта, запуск, миграции, структура |
 | `tests/` | pytest-тесты: герметичные (временный CWD), живая БД защищена guard'ом |
 | `REFACTORING_PLAN.md` | План рефакторинга, карта дефектов (D1-D25) и журнал прогресса |
 | `settings.example.json` | Образец настроек без секретов (в git) |
@@ -75,8 +73,12 @@ Telegram-бот, который по ссылке скачивает аудио 
    отдаёт `WhisperTranscriber` — модель грузится **при первом голосовом** (в потоке,
    с `Semaphore(1)`), язык/модель из настроек, `whisper-enabled` выключает фичу,
    а отсутствие пакета не роняет бота. Ответ — `message.reply`.
-9. **Запуск**: `python bot.py` из корня проекта (settings.json и downloads.db ищутся
-   относительно CWD; путь к настройкам можно задать в `$TUNE_LOADER_SETTINGS`). Сейчас работает как `tune-loader-bot.service` от пользователя `denis`.
+9. **Запуск**: `.venv/bin/python -m tune_loader_bot` из корня проекта (то же делает
+   `python bot.py`); настройки и БД ищутся относительно CWD, путь к настройкам —
+   `$TUNE_LOADER_SETTINGS`. Композиция и остановка — в `tune_loader_bot/app.py`:
+   по SIGTERM aiogram завершает polling, приложение закрывает БД и отменяет watchdog.
+   В бою — `tune-loader-bot.service` от пользователя `denis`, лог
+   `/var/log/tune-loader-bot.log` (`StandardOutput=append:`).
 
 ## Схема БД (`downloads.db`)
 
@@ -117,11 +119,8 @@ journalctl/tail -f tune-loader-bot.log
 ## Известные особенности и подводные камни
 
 Актуальный список дефектов (D1-D25) и статус закрытия — в `REFACTORING_PLAN.md`
-(§1 и §8, там же колонка «Закрыт»). Закрыто в фазах 0-7: схема БД и миграции
-(D1/D2/D8/D15), конфиг с валидацией (D17), тестовый контур и зависимости (D16),
-медиа-слой (D3/D4/D6/D20/D22/D23/D24), реестр сервисов (D10/D11),
-telegram-слой (D9/D21), watchdog (D13), транскрипция (D14); D19/D25 закрыты
-частично — graceful shutdown и настройка логов остаются в фазе 8.
+(§1 и §8, там же колонка «Закрыт»). Фазы 0-8 закрыты: из D1-D25 открытым остаётся
+только D5 (имена файлов, см. ниже).
 
 Знание о сервисах — только в `tune_loader_bot/domain/services.py` (домены,
 форматы, селекторы yt-dlp). Не дублировать регулярки и наборы форматов в
@@ -131,7 +130,7 @@ telegram-слой (D9/D21), watchdog (D13), транскрипция (D14); D19/
 (`{"youtube": {"player_js_version": ["actual"]}}`) — строку yt-dlp разбирает по
 символам и пишет в лог `Invalid player JS version "a"`.
 
-Ещё не исправлено (фаза 8):
+Осталось решить владельцу:
 
 - Имя файла задаётся настройкой `filename-template` (по умолчанию
   `%(title).100s`): одноимённые видео затирают друг друга, пока владелец не
@@ -148,10 +147,14 @@ telegram-слой (D9/D21), watchdog (D13), транскрипция (D14); D19/
 - Изменения схемы БД — новой версией в `tune_loader_bot/storage/migrations.py`
   (+ `PRAGMA user_version`), идемпотентно и с копией базы. База живая, содержит
   реальные данные: сначала `--check`, потом `--apply` в окне обслуживания.
-- Тесты и линт: `.venv/bin/python -m pytest`, `.venv/bin/ruff check .`. Тесты
-  обязаны работать в `tmp_path`: `database.py` открывает `downloads.db`
-  относительно CWD, а в `tests/conftest.py` стоит guard, который роняет тест при
-  изменении живой БД. Живая БД — реальные данные, писать в неё из тестов нельзя.
+- Тесты и линт: `.venv/bin/python -m pytest`, `.venv/bin/ruff check .`; в CI — то
+  же плюс порог покрытия 85%. Тесты обязаны работать в `tmp_path`: путь к базе
+  берётся из настроек, а в `tests/conftest.py` стоит guard, который роняет тест
+  при изменении живой `downloads.db`. Живая БД — реальные данные, писать в неё из
+  тестов нельзя.
+- Новый код — в пакете `tune_loader_bot/`, зависимости передаются явно
+  (`Settings`, `Storage`, `MediaLibrary`, `HandlerContext`). Запуск —
+  `python -m tune_loader_bot`, работа с базой — `python -m tune_loader_bot.migrate`.
 - Проверка в бою — запуск `python bot.py` и логи. Сервис под systemd,
   не перезапускать его без явной просьбы.
 - `AGENTS.md` — краткое описание, обновлять при изменениях архитектуры.

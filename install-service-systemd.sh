@@ -45,16 +45,28 @@ echo "Service will be executed with the user '${USER_NAME}'"
 
 # Write the systemd service descriptor
 SERVICE_NAME_PATH="/etc/systemd/system/${SERVICE_NAME}"
+LOG_FILE="/var/log/tune-loader-bot.log"
+
+# StandardOutput=append: пишет от имени юнита, поэтому файл должен существовать
+# и быть доступным пользователю сервиса (иначе systemd не сможет его открыть).
+if [ ! -f "${LOG_FILE}" ]; then
+    echo "Creating log file '${LOG_FILE}' ..."
+    touch "${LOG_FILE}"
+fi
+chown "${USER_NAME}:users" "${LOG_FILE}" || true
+
 echo "Creating unit file in '${SERVICE_NAME_PATH}' ..."
 cat > "${SERVICE_NAME_PATH}" <<EOL
 [Unit]
-Description=Torrent Manager Bot Daemon
+Description=tune-loader-bot: Telegram media loader
 After=network.target
 
 [Service]
-SyslogIdentifier=torrent-manager-bot
-StandardOutput=file:/var/log/tune-loader-bot.log
-StandardError=file:/var/log/tune-loader-bot.log
+SyslogIdentifier=tune-loader-bot
+# append: (а не file:) — иначе лог обрезается при каждом перезапуске
+StandardOutput=append:${LOG_FILE}
+StandardError=append:${LOG_FILE}
+Environment=PYTHONUNBUFFERED=1
 Restart=always
 RestartSec=5
 Type=simple
@@ -62,8 +74,10 @@ User=${USER_NAME}
 Group=users
 WorkingDirectory=${WORK_DIR}
 
-ExecStart=/bin/bash -c "source .venv/bin/activate;python bot.py"
+ExecStart=${WORK_DIR}/.venv/bin/python -m tune_loader_bot
 
+# Бот останавливается по SIGTERM: aiogram завершает polling, приложение
+# закрывает соединение с БД и отменяет watchdog (см. tune_loader_bot/app.py).
 TimeoutStopSec=30
 
 [Install]

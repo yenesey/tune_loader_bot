@@ -1,6 +1,5 @@
 """Тесты конфигурации (фаза 1): валидация, значения по умолчанию, понятные ошибки."""
 
-import importlib
 import json
 
 import pytest
@@ -178,14 +177,3 @@ def test_get_settings_is_cached(tmp_path, monkeypatch):
 
     reset_settings_cache()
     assert get_settings().log_level == "DEBUG"
-
-
-def test_legacy_settings_module_exposes_dict(project):
-    """`settings.SETTINGS` остаётся dict со старыми ключами (переходный слой)."""
-    importlib.import_module("tune_loader_bot.config").reset_settings_cache()
-    settings_module = importlib.import_module("settings")
-
-    assert settings_module.SETTINGS["download-dir"] == str(project / "media")
-    assert settings_module.SETTINGS["server-root-url"] == "https://example.test/media"
-    assert settings_module.SETTINGS["users-list"] == [111, 222]
-    assert settings_module.SETTINGS["name-sep"] == "—"

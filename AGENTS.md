@@ -26,7 +26,8 @@ Telegram-бот, который по ссылке скачивает аудио 
 | Файл | Роль |
 |---|---|
 | `bot.py` | Точка входа: aiogram-диспетчер, middleware доступа, FSM-диалог выбора формата, обработчики сообщений/постов канала, транскрипция, фоновый `watchdog` подписок |
-| `download.py` | Обёртка над yt-dlp: `download_media()` (один трек/видео) и `download_playlist()` (разбор плейлиста без скачивания) |
+| `tune_loader_bot/media/` | `paths.py` (раскладка файлов, публичные ссылки), `ytdlp.py` (опции, загрузка, разбор плейлиста) |
+| `download.py` | Переходный фасад над медиа-слоем: `download_media()`, `download_playlist()` |
 | `tune_loader_bot/` | Пакет: `config.py`, `domain/models.py`, `storage/{db,migrations}.py`, `migrate.py` (CLI миграций) |
 | `database.py` | Переходный dict-API хранилища (`Database`); внутри — `tune_loader_bot.storage` |
 | `settings.py` | Переходный dict-доступ к настройкам (`SETTINGS`); удаляется после фаз 3-6 |
@@ -100,31 +101,33 @@ journalctl/tail -f tune-loader-bot.log
 ```
 
 Требуется `settings.json` в CWD, `cookies.txt` для YouTube и Deno
-(путь захардкожен: `/home/denis/.deno/bin/deno` в `download.py`).
+(путь задаётся настройкой `deno-path`, иначе ищется в `PATH`).
 Миграции базы — `.venv/bin/python -m tune_loader_bot.migrate --report|--check|--apply`.
 
 ## Известные особенности и подводные камни
 
 Актуальный список дефектов (D1-D25) и статус закрытия — в `REFACTORING_PLAN.md`
-(§1 и §8). Закрыто в фазах 0-2: схема БД и миграции (D1/D2/D8/D15), конфиг с
-валидацией (D17), тестовый контур и зависимости (D16).
+(§1 и §8, там же колонка «Закрыт»). Закрыто в фазах 0-3: схема БД и миграции
+(D1/D2/D8/D15), конфиг с валидацией (D17), тестовый контур и зависимости (D16),
+медиа-слой (D3/D4/D6/D20/D22/D23/D24).
 
-Ещё не исправлено (фазы 3-8):
+Важно про yt-dlp: значения в `extractor_args` передаются **только списками**
+(`{"youtube": {"player_js_version": ["actual"]}}`) — строку yt-dlp разбирает по
+символам и пишет в лог `Invalid player JS version "a"`.
+
+Ещё не исправлено (фазы 4-8):
 
 - `whisper.load_model("turbo")` вызывается **на импорте** `bot.py`: старт
   медленный, ~1.4 ГБ RSS (фаза 7).
-- `YTDL_OPTS` — глобальный мутируемый dict: одновременные загрузки
-  (пользователь + watchdog) перемешивают `format`/`postprocessors`/`paths`, а
-  `extractor_args` для YouTube собраны неверно (фаза 3).
 - `USER_DATA` — обычный dict в памяти: течёт, теряется при рестарте (callback →
   `KeyError`), не учитывает несколько чатов (фаза 5).
 - `create_download_dialog`: у `soundcloud`/`yandex`/`tiktok`/`instagram` значения —
   строки вместо кортежей; regex'ы сервисов слабо заякорены (фаза 4).
+- Имя файла задаётся настройкой `filename-template` (по умолчанию
+  `%(title).100s`): одноимённые видео затирают друг друга, пока владелец не
+  включит вариант с `%(id)s` (D5).
 - `find_url` без `user_id` теперь детерминирован (самая свежая запись), но
   остаётся общим кэшем — привязка к пользователю появляется в фазе 5.
-- Нет обработки ситуации, когда yt-dlp вернул результат, но `MoveFiles` не
-  сработал (`file_path` может отсутствовать); `file_size` тогда `None` (фаза 3).
-- Путь к Deno и `cookies.txt` захардкожены относительно CWD (фаза 3).
 - Секреты (`settings.json`, `cookies.txt`, `downloads.db`, лог) в `.gitignore` —
   **не коммитить и не печатать их содержимое**. Копии базы `downloads.db.*.bak`
   тоже в `.gitignore`, но содержат реальные данные — не публиковать.

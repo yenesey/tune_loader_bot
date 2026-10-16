@@ -8,6 +8,7 @@
   "users-list": [111111111, 222222222],
   "db-path": "downloads.db",
   "cookies-file": "cookies.txt",
+  "filename-template": "%(title).100s",
   "max-concurrent-downloads": 2,
   "tg-max-file-size": 52428800,
   "watch-playlist-items": "1,2",

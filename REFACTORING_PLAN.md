@@ -40,11 +40,30 @@
     `youtube_player_js_version` / `youtube_player_js_variant` лежат **на уровне
     имён экстракторов** и поэтому молча игнорируются.
 
-Ограничение среды: в текущей сессии **не работает bash** (нет sandbox-бэкенда
-для режима workspace-write), поэтому не удалось: запустить `python -m pytest`,
-посмотреть схему живой `downloads.db`, сверить `pip freeze`. Все выводы по БД —
-из кода + `AGENTS.md`. Перед реализацией нужен рабочий shell (либо
-`danger-full-access`, либо установленный bubblewrap/Landlock).
+Проверено прогоном в рабочем shell (16.10.2026; включён файловый режим
+`danger-full-access`, ограничений на команды нет):
+
+- Python 3.13.5 — и `python3`, и `.venv/bin/python`; **pytest, pytest-asyncio,
+  anyio в venv отсутствуют**, тестовый стек надо ставить.
+- `requirements.txt` разошёлся с venv: aiosqlite 0.22.1 против установленного
+  0.21.0, yt-dlp 2026.3.17 против установленного 2026.8.19; `openai-whisper
+  20250625` и `torch 2.13.0` стоят в venv, но в requirements их нет.
+- Живая БД (read-only запрос, 811 КБ): `PRAGMA user_version = 0` — учёта миграций
+  нет; 2065 строк в `downloads`, 2 подписки.
+  - `artist TEXT`, `channel TEXT`, `delivered BOOLEAN` **есть** — подтверждает
+    ручной ALTER (в `CREATE TABLE` в коде их нет);
+  - `user_id`: 1970 строк `integer`, **95 строк `NULL`** (посты канала);
+  - дубликатов по `(url, video, user_id)` и по `(url, video)` — **0**;
+  - `file_size IS NULL` — **0** строк;
+  - `date` и `last_check` пишутся с микросекундами
+    (`2025-05-10 19:03:55.219335`), поэтому текущий `strptime(..., "%f")` на этих
+    данных работает.
+
+Следствия для плана: D1 подтверждён (чистая БД не поднимется); D2 — риск
+латентный (дублей нет только потому, что перед вставкой всегда вызывается
+`find_url`), а путаница `str`/`int` в данных не проявилась из-за NUMERIC-affinity
+колонки `STRING`; `user_version = 0` — удобная точка старта миграций; шаг
+«`NULL` → `0`» из фазы 2 затрагивает 95 строк и обязателен.
 
 ---
 
@@ -55,14 +74,14 @@ Severity: **C** — ломает данные/прод, **H** — заметны
 
 | # | Sev | Проблема | Где |
 |---|---|---|---|
-| D1 | C | `CREATE TABLE downloads` не содержит `artist`, `channel`, `delivered`, а `save_download`/`find_url` их используют → на **чистой** БД всё падает (`no such column`). Схема живёт только потому, что колонки добавлены руками | `database.py:33-41` vs `57-64, 67-91` |
-| D2 | C | `user_id` в UNIQUE-индексе, но допускает NULL (посты канала): в SQLite NULL-ы уникальны → повторный пост той же ссылки создаёт новую строку и повторную загрузку. Плюс тип `user_id` не консистентен: `str()` в ЛС, `int` из подписки → у одного пользователя две «разные» записи | `database.py:37`, `bot.py:131`, `bot.py:343` |
+| D1 | C | `CREATE TABLE downloads` не содержит `artist`, `channel`, `delivered`, а `save_download`/`find_url` их используют → на **чистой** БД всё падает (`no such column`). Схема живёт только потому, что колонки добавлены руками (подтверждено `PRAGMA table_info` живой БД) | `database.py:33-41` vs `57-64, 67-91` |
+| D2 | M | Уникальность `(url, video, user_id)` не действует для строк с `user_id IS NULL` (в SQLite NULL-ы различны; в живой БД таких строк **95 из 2065** — посты канала). Дублей сейчас нет только потому, что `process_message` всегда ищет запись перед вставкой; любой новый путь записи (или её обход) их создаст. Тип `user_id` не консистентен (`str()` в ЛС, `int` из подписки), но в данных это не проявилось: колонка `STRING` имеет NUMERIC-affinity и приводит текст к числу | `database.py:37`, `bot.py:131, 343` |
 | D3 | C | Глобальный мутируемый `YTDL_OPTS`: `format`, `postprocessors`, `paths`, `playlist_items` переписываются на каждый вызов → одновременные загрузки (пользователь + watchdog) перемешивают настройки | `download.py:11-42, 73-89, 102` |
 | D4 | H | `extractor_args` собран неправильно (см. §0): `player_client`, `youtube_player_js_*` не действуют; po-token'ы вложены верно, но эффект частичный | `download.py:13-24` |
 | D5 | H | `outtmpl = "%(title).100s"` + `overwrites: True`: два разных видео с одинаковым названием **затирают** друг друга, а в БД обе записи указывают на один файл | `download.py:34, 38, 60-68` |
-| D6 | H | Хук `MoveFiles`: `os.path.getsize(filepath)` без проверки существования, `os.path.basename(info.get("filepath"))` при `None` → исключение внутри хука, `result = None`, `file_size = None`; далее `result["file_size"] < TG_MAX_FILE_SIZE` → `TypeError` | `download.py:58-69`, `bot.py:136` |
+| D6 | H | Хук `MoveFiles`: `os.path.getsize(filepath)` без проверки существования, `os.path.basename(info.get("filepath"))` при `None` → исключение внутри хука, `result = None`, `file_size = None`; далее `result["file_size"] < TG_MAX_FILE_SIZE` → `TypeError`. Латентно: в живой БД `file_size IS NULL` — 0 строк | `download.py:58-69`, `bot.py:136` |
 | D7 | H | `find_url(url, video)` без `user_id` возвращает произвольную строку (первую по индексу) → чужой `delivered`/метаданные, «кэш» не привязан к пользователю. Файл на диске не проверяется, хотя каталог ~93 ГБ и чистится | `database.py:67-91`, `bot.py:100-104` |
-| D8 | H | `ON CONFLICT ... DO UPDATE SET delivered = excluded.delivered` — повторная загрузка не обновляет `file_size`/`title`/`artist`/`channel`/`date`, `None`-размер остаётся навсегда | `database.py:61-62` |
+| D8 | H | `ON CONFLICT ... DO UPDATE SET delivered = excluded.delivered` — повторная загрузка не обновляет `file_size`/`title`/`artist`/`channel`/`date`, `None`-размер остаётся навсегда (латентно: в живой БД таких строк 0) | `database.py:61-62` |
 | D9 | M | `USER_DATA` — обычный dict с объектами `Message`: течёт, теряется при рестарте (callback → `KeyError`), не учитывает несколько чатов на пользователя | `bot.py:43, 224, 234` |
 | D10 | M | `create_download_dialog`: `("audio")` — это строка, а не кортеж, поэтому `btn in options[key]` работает как поиск подстроки; набор форматов и параметры yt-dlp описаны в двух несвязанных местах | `bot.py:186-210`, `download.py:86-89` |
 | D11 | M | `check_url`: незаэкранированные точки (`www.`, `.be/`), необязательный префикс `youtu(?:...)?` → совпадёт `https://youtubeevil.com/...`; нет нормализации хоста/регистра; rutube/coub/instagram — сложные regex без тестов | `bot.py:163-182` |
@@ -70,7 +89,7 @@ Severity: **C** — ломает данные/прод, **H** — заметны
 | D13 | M | watchdog: один `try` на весь цикл, `last_check` сохраняется **до** работы (после ошибки подписка «считается проверенной»), `playlist_items` захардкожен `"1,2"`, фильтр ключевых слов — подстрока с учётом регистра, `DB` берётся из глобала, хотя передан параметром | `bot.py:302-347` |
 | D14 | M | `whisper.load_model("turbo")` на импорте: +1.4 ГБ RSS и медленный старт, даже если голосовые не используются; нет ограничения параллельных транскрипций; `file` может быть не определён; язык захардкожен | `bot.py:46, 251-278` |
 | D15 | M | Singleton `Database` с `_conn: aiosqlite.Connection` как заглушкой класса, путь `"downloads.db"` захардкожен относительно CWD, нет `close()`, нет `WAL`/`busy_timeout`, `create()` можно вызвать повторно и потерять соединение | `database.py:7-45` |
-| D16 | M | `requirements.txt` — полный freeze с транзитивными зависимостями, без whisper/torch и без dev-зависимостей; версия yt-dlp разошлась с venv | `requirements.txt` |
+| D16 | M | `requirements.txt` — полный freeze с транзитивными зависимостями, без whisper/torch и без dev-зависимостей; расходится с venv: yt-dlp 2026.3.17 vs 2026.8.19, aiosqlite 0.22.1 vs 0.21.0 | `requirements.txt` |
 | D17 | M | `settings.py`: `json.load(open('settings.json'))` на импорте, без валидации и внятной ошибки, путь зависит от CWD | `settings.py:15-18` |
 | D18 | L | systemd: `StandardOutput=file:` **обрезает лог** при каждом рестарте, `Description=Torrent Manager Bot`, `SyslogIdentifier=torrent-manager-bot`, запуск через `bash -c "source .venv/bin/activate"` | `install-service-systemd.sh:51,55,56,65` |
 | D19 | L | Нет graceful shutdown: БД не закрывается, watchdog-задача не отменяется; middleware регистрируется только под `__main__`, поэтому тестируемый `dp` не равен боевому | `bot.py:350-366` |
@@ -430,8 +449,6 @@ Non-goals: смена СУБД, веб-интерфейс, изменение п
 5. **Окно миграции**: можно ли один раз остановить сервис для бэкапа/миграции БД?
 6. **Порядок работ**: начинать с фаз 0–2 (данные/БД, максимум пользы) или сразу
    с разбиения на модули (фазы 1, 4, 5)?
-7. **Среда**: для установки pytest и прогонов нужен рабочий shell — разрешить
-   `danger-full-access` для этого воркспейса или починить sandbox?
 
 ---
 
@@ -480,4 +497,8 @@ Non-goals: смена СУБД, веб-интерфейс, изменение п
 Формат: `YYYY-MM-DD · фаза · что сделано · проверка · коммит/PR`
 
 - 2026-10-16 · — · подготовлен план рефакторинга (без правок кода) · `git diff`
-  пуст, план добавлен файлом `REFACTORING_PLAN.md` · —
+  пуст, план добавлен файлом `REFACTORING_PLAN.md` · коммит `3e1ba97`
+- 2026-10-16 · — · сверены окружение и живая БД (python 3.13.5, pytest нет,
+  дрейф requirements, `user_version=0`, 2065 строк, 95 `NULL` user_id, дублей и
+  `NULL`-размеров нет); план уточнён по фактам, вопрос про sandbox снят ·
+  read-only запросы к `downloads.db`, `.venv/bin/pip list`, `git status` · —

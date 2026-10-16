@@ -6,6 +6,6 @@
 удаляется (см. REFACTORING_PLAN.md, §2).
 """
 
-from config import get_settings
+from tune_loader_bot.config import get_settings
 
 SETTINGS = get_settings().as_legacy_dict()

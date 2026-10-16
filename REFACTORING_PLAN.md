@@ -197,34 +197,38 @@ DoD: тесты на загрузку/валидацию/дефолты; про�
 
 ### Фаза 2. Хранилище и миграции (1.5–2 дня) — самая рискованная
 
-- `storage/models.py`: `Download`, `Subscription` (dataclass + `from_row`),
-  канонизация типов: `user_id: int` (для постов канала — `0`), `video: bool`,
-  `delivered: bool`, `file_size: int | None`.
-- `storage/db.py`: соединение с `row_factory=aiosqlite.Row`,
-  `PRAGMA journal_mode=WAL`, `busy_timeout=5000`, `foreign_keys=ON`, `close()`;
-  путь из конфига; никакого singleton-`__new__`.
-- `storage/migrations.py`: `PRAGMA user_version` + список шагов.
-  - **v1**: полная `CREATE TABLE` (включая `artist`, `channel`, `delivered`,
-    `user_id NOT NULL DEFAULT 0`) — лечит D1, чистая БД поднимается с нуля.
-  - **v2**: для живой БД — добавить недостающие колонки по `PRAGMA table_info`
-    (SQLite не умеет `ADD COLUMN IF NOT EXISTS`), затем:
-    `UPDATE downloads SET user_id = 0 WHERE user_id IS NULL`;
-    `UPDATE downloads SET user_id = CAST(user_id AS INTEGER) WHERE typeof(user_id) = 'text'`;
-    дедупликация `(url, video, user_id)` с сохранением самой свежей строки и
-    `delivered = MAX(delivered)`;
-    пересоздание `idx_downloads`. Перед всем этим — `shutil.copy2` в
-    `downloads.db.YYYYmmdd-HHMMSS.bak` (только если `user_version < target`).
-  - v3: нормализация меток времени (`%Y-%m-%d %H:%M:%S`), терпимый парсер
-    (набор форматов + `None` при неудаче).
-- `find_url` — всегда с обязательным `user_id` и `ORDER BY date DESC LIMIT 1`;
-  `save_download` — `DO UPDATE SET` всех изменяемых полей (лечит D7/D8).
-- Отдельная команда `python -m tune_loader_bot.migrate --check/--apply` и
-  read-only `scripts/db_report.py` (кол-во записей, дубликаты, NULL user_id,
-  строки без файла на диске).
+- `domain/models.py`: `Download`, `Subscription` (dataclass, `from_row`,
+  `as_row`, `to_legacy_dict`), канонизация типов: `user_id: int` (для постов
+  канала — `0`), `video: bool`, `delivered: bool`, `file_size: int | None`;
+  терпимый разбор меток времени вместо строгого `%f` (D12).
+- `storage/db.py`: `Storage.open()` с `row_factory=aiosqlite.Row`,
+  `journal_mode=WAL`, `busy_timeout=5000`, `foreign_keys=ON`, `close()`; путь из
+  настроек; никакого singleton-`__new__` (D15).
+- `storage/migrations.py`: `PRAGMA user_version = 1`, один идемпотентный набор
+  шагов и для чистой, и для живой базы:
+  снять `idx_downloads` (иначе `NULL → 0` упрётся в UNIQUE) → добавить
+  недостающие колонки по `PRAGMA table_info` → `user_id IS NULL → 0`,
+  `video`/`delivered` NULL → 0 → `delivered = MAX(delivered)` по группе и
+  удаление дубликатов `(url, video, user_id)` с сохранением самой свежей записи →
+  пересоздать UNIQUE-индекс → `PRAGMA integrity_check`.
+  Бэкап `downloads.db.YYYYmmdd-HHMMSS.bak` делается только если таблица
+  `downloads` уже существовала (свежий файл SQLite создаёт сам при `connect()`).
+  Нормализации «текстовых» `user_id` нет: affinity колонки всё равно вернёт
+  текст, поэтому такие строки только считаются и попадают в отчёт.
+- `find_url` сортирует `ORDER BY date DESC LIMIT 1` (D7), `save_download`
+  обновляет все изменяемые поля (D8) и не сбрасывает `delivered`.
+- CLI: `python -m tune_loader_bot.migrate --report|--check|--apply`
+  (`--report`/`--check` не меняют базу, `--apply` делает копию). Проверка файлов
+  на диске — фаза 3, когда появится `media/paths.py`.
 
 DoD: миграция прогоняется на **копии** живой БД: число строк не уменьшилось
 (≥2055), дубликатов нет, `find_url`/`save_download` работают; тесты на
 in-memory БД и на копии.
+
+Факт (16.10.2026): код готов и проверен, DoD выполнен на копии — 2065 записей
+сохранены, 95 `NULL user_id` → 0, `delivered` (683 записи) не потерян,
+`integrity_check: ok`. Применение к живой базе — отдельный шаг с остановкой
+сервиса (см. §5), статус фазы 🟡 до его выполнения.
 
 ### Фаза 3. Медиа-слой / yt-dlp (1–1.5 дня)
 
@@ -411,8 +415,8 @@ cookies подхватываются; прогон `python -m tune_loader_bot` �
    пользователем; сами правки кода сервис не трогают).
 3. `python -m tune_loader_bot.migrate --check` (read-only отчёт), затем
    `--apply` (пишет бэкап-копию рядом с БД и повышает `user_version`).
-4. `python scripts/db_report.py` — сверить количество строк и отсутствие
-   дубликатов/NULL user_id.
+4. `python -m tune_loader_bot.migrate --report` — сверить количество строк и
+   отсутствие дубликатов/NULL user_id.
 5. Запуск сервиса, проверка логов и одной реальной ссылки.
 6. Откат: восстановить `.bak`, вернуть предыдущий коммит.
 7. Тесты и любые скрипты обязаны работать в `tmp_path`: `database.py` открывает
@@ -487,7 +491,7 @@ Non-goals: смена СУБД, веб-интерфейс, изменение п
 |---|---|---|---|---|
 | 0. Страховка (git, pyproject, requirements, характеризационные тесты) | ✅ | `refactor/phase-0` | 55 тестов, ruff clean, живая БД не тронута | 2026-10-16 |
 | 1. Конфиг (Settings, валидация, env) | ✅ | `refactor/phase-1` | 70 тестов, ruff clean, живой settings.json валиден | 2026-10-16 |
-| 2. Хранилище и миграции | ⬜ | — | — | — |
+| 2. Хранилище и миграции | 🟡 | `refactor/phase-2` | 115 тестов; миграция прогнана на копии живой БД (2065 записей, integrity ok); сама живая БД ждёт окна | 2026-10-16 |
 | 3. Медиа-слой / yt-dlp | ⬜ | — | — | — |
 | 4. Реестр сервисов | ⬜ | — | — | — |
 | 5. Telegram-слой | ⬜ | — | — | — |
@@ -514,6 +518,17 @@ Non-goals: смена СУБД, веб-интерфейс, изменение п
   содержимому строк, реальные подписки (id 2 `@etozbignev`, id 4 `@SuperSharij`)
   не пострадали, счётчики восстановлены (2065 записей / 2 подписки) ·
   проверка содержимым строк + read-only подсчёт после удаления · —
+- 2026-10-16 · 2 · фаза 2: появился пакет `tune_loader_bot/` (туда переехал
+  `config.py`), добавлены `domain/models.py`, `storage/db.py`,
+  `storage/migrations.py`, CLI `tune_loader_bot.migrate`; `database.py` стал
+  переходным dict-шимом над `Storage`. Закрыты D1 (схема с нуля поднимается),
+  D2 (`NULL` → 0, уникальность работает), D8 (upsert обновляет все поля),
+  D15 (никакого singleton'а, путь из настроек, `close()`, WAL/busy_timeout),
+  D12 (терпимый разбор меток времени). Тесты: характеризационные заменены на
+  проверки нового поведения + миграции (в т.ч. на копии живой БД) ·
+  115 passed, ruff clean, mtime/size живой БД без изменений, CLI-прогон на копии:
+  2065 → 2065 записей, 95 NULL → 0, delivered 683 сохранён, integrity ok ·
+  живая БД НЕ мигрирована (ждёт окна обслуживания) · —
 - 2026-10-16 · 1 · фаза 1: `config.py` — `Settings` на pydantic (alias'ы старых
   ключей, дефолты, `ConfigError` с понятным текстом, `$TUNE_LOADER_SETTINGS`),
   `settings.py` стал переходным dict-шимом, добавлен `settings.example.json`,

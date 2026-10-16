@@ -5,7 +5,7 @@ import json
 
 import pytest
 
-from config import (
+from tune_loader_bot.config import (
     DEFAULT_SETTINGS_FILE,
     SETTINGS_ENV_VAR,
     ConfigError,
@@ -182,7 +182,7 @@ def test_get_settings_is_cached(tmp_path, monkeypatch):
 
 def test_legacy_settings_module_exposes_dict(project):
     """`settings.SETTINGS` остаётся dict со старыми ключами (переходный слой)."""
-    importlib.import_module("config").reset_settings_cache()
+    importlib.import_module("tune_loader_bot.config").reset_settings_cache()
     settings_module = importlib.import_module("settings")
 
     assert settings_module.SETTINGS["download-dir"] == str(project / "media")

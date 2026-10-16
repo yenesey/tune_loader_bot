@@ -5,9 +5,11 @@ Telegram-бот, который по ссылке скачивает аудио 
 автоматически следить за YouTube-плейлистами/каналами по подпискам. Дополнительно
 расшифровывает голосовые сообщения в текст (OpenAI Whisper).
 
-Проект небольшой и плоский: 4 python-модуля в корне, без пакета; есть тесты
-(pytest) и линт (ruff). Идёт поэтапный рефакторинг — план, карта дефектов и
-учёт прогресса в `REFACTORING_PLAN.md` (статус фаз — §8).
+Появляется пакет `tune_loader_bot/` (`config`, `domain`, `storage`, CLI миграций);
+легаси-модули в корне (`bot.py`, `download.py`, `database.py`, `settings.py`) пока
+остаются плоскими и заменяются по фазам. Есть тесты (pytest) и линт (ruff). Идёт
+поэтапный рефакторинг — план, карта дефектов и учёт прогресса в
+`REFACTORING_PLAN.md` (статус фаз — §8).
 
 ## Стек
 
@@ -25,8 +27,8 @@ Telegram-бот, который по ссылке скачивает аудио 
 |---|---|
 | `bot.py` | Точка входа: aiogram-диспетчер, middleware доступа, FSM-диалог выбора формата, обработчики сообщений/постов канала, транскрипция, фоновый `watchdog` подписок |
 | `download.py` | Обёртка над yt-dlp: `download_media()` (один трек/видео) и `download_playlist()` (разбор плейлиста без скачивания) |
-| `database.py` | Singleton-обёртка над SQLite (`downloads.db`): `downloads` + `subscriptions` |
-| `config.py` | Читает и валидирует `settings.json` (`Settings`, `get_settings()`); путь переопределяется `$TUNE_LOADER_SETTINGS` |
+| `tune_loader_bot/` | Пакет: `config.py`, `domain/models.py`, `storage/{db,migrations}.py`, `migrate.py` (CLI миграций) |
+| `database.py` | Переходный dict-API хранилища (`Database`); внутри — `tune_loader_bot.storage` |
 | `settings.py` | Переходный dict-доступ к настройкам (`SETTINGS`); удаляется после фаз 3-6 |
 | `pyproject.toml` | Конфиг ruff и pytest (проект пока не сборочный пакет) |
 | `tests/` | pytest-тесты: герметичные (временный CWD), живая БД защищена guard'ом |
@@ -67,11 +69,25 @@ Telegram-бот, который по ссылке скачивает аудио 
 
 ## Схема БД (`downloads.db`)
 
+- Версия схемы — `PRAGMA user_version` (сейчас **1**); миграции живут в
+  `tune_loader_bot/storage/migrations.py`, идемпотентны и делают копию базы.
 - `downloads(date, user_id, url, video, file_name, file_size, title, artist, channel, delivered)`
-  + `UNIQUE INDEX idx_downloads(url, video, user_id)`; `artist`/`channel`/`delivered`
-  добавлялись к исходной схеме вручную — в `CREATE TABLE` в коде их нет.
+  + `UNIQUE INDEX idx_downloads(url, video, user_id)`.
+- `user_id` — всегда число; `0` означает «служебного» пользователя для постов
+  канала (раньше был NULL, а NULL в SQLite не участвует в UNIQUE-индексе, из-за
+  чего копились дубликаты). `video`/`delivered` — 0/1.
 - `subscriptions(id, user_id, url, keywords, interval, last_check)`.
+- Соединение открывается с `journal_mode=WAL`, `busy_timeout=5000`,
+  `foreign_keys=ON`, `row_factory=aiosqlite.Row`.
 - Представление `v_users` (в коде не используется) — маппинг user_id на имена.
+
+Проверка и миграция:
+
+```bash
+.venv/bin/python -m tune_loader_bot.migrate --report   # сводка (только чтение)
+.venv/bin/python -m tune_loader_bot.migrate --check    # что будет сделано
+.venv/bin/python -m tune_loader_bot.migrate --apply    # применить (копия *.bak)
+```
 
 ## Запуск и деплой
 
@@ -85,37 +101,41 @@ journalctl/tail -f tune-loader-bot.log
 
 Требуется `settings.json` в CWD, `cookies.txt` для YouTube и Deno
 (путь захардкожен: `/home/denis/.deno/bin/deno` в `download.py`).
+Миграции базы — `.venv/bin/python -m tune_loader_bot.migrate --report|--check|--apply`.
 
 ## Известные особенности и подводные камни
 
-- `whisper.load_model("turbo")` вызывается **на импорте** `bot.py`: старт медленный,
-  ~1.4 ГБ RSS (torch/whisper ставятся отдельно: `requirements-whisper.txt`).
-- `YTDL_OPTS` — глобальный мутируемый dict: `download_media()` меняет `format`,
-  `postprocessors`, `paths` при каждом вызове. Одновременные загрузки (пользователь +
-  watchdog) могут перемешать настройки. Для плейлистов остаётся «последний» `format`.
-- `USER_DATA` — обычный dict в памяти: течёт, теряется при рестарте (тогда callback
-  упадёт с `KeyError`), не учитывает несколько чатов на пользователя.
-- FSM-состояние общее для всех: любой текст от пользователя в состоянии выбора формата
-  перезаписывает `USER_DATA`.
+Актуальный список дефектов (D1-D25) и статус закрытия — в `REFACTORING_PLAN.md`
+(§1 и §8). Закрыто в фазах 0-2: схема БД и миграции (D1/D2/D8/D15), конфиг с
+валидацией (D17), тестовый контур и зависимости (D16).
+
+Ещё не исправлено (фазы 3-8):
+
+- `whisper.load_model("turbo")` вызывается **на импорте** `bot.py`: старт
+  медленный, ~1.4 ГБ RSS (фаза 7).
+- `YTDL_OPTS` — глобальный мутируемый dict: одновременные загрузки
+  (пользователь + watchdog) перемешивают `format`/`postprocessors`/`paths`, а
+  `extractor_args` для YouTube собраны неверно (фаза 3).
+- `USER_DATA` — обычный dict в памяти: течёт, теряется при рестарте (callback →
+  `KeyError`), не учитывает несколько чатов (фаза 5).
 - `create_download_dialog`: у `soundcloud`/`yandex`/`tiktok`/`instagram` значения —
-  строки вместо кортежей (`("audio")`), фильтр `btn in options[key]` работает случайно,
-  за счёт подстроки.
-- `find_url()` без `user_id` берёт произвольную запись (fetchone) — в watchdog
-  кэш общий, а `delivered` у записи чужого пользователя.
-- `save_download()` при конфликте обновляет **только** `delivered`, поэтому повторная
-  загрузка не обновляет метаданные/размер.
-- Regex YouTube (`youtu(?:.be/|be.com/)?`) и rutube/coub — слабо заякорены.
-- Нет обработки ситуации, когда yt-dlp вернул результат, но `MoveFiles` не сработал
-  (`file_path` может отсутствовать); `file_size` тогда `None`.
+  строки вместо кортежей; regex'ы сервисов слабо заякорены (фаза 4).
+- `find_url` без `user_id` теперь детерминирован (самая свежая запись), но
+  остаётся общим кэшем — привязка к пользователю появляется в фазе 5.
+- Нет обработки ситуации, когда yt-dlp вернул результат, но `MoveFiles` не
+  сработал (`file_path` может отсутствовать); `file_size` тогда `None` (фаза 3).
+- Путь к Deno и `cookies.txt` захардкожены относительно CWD (фаза 3).
 - Секреты (`settings.json`, `cookies.txt`, `downloads.db`, лог) в `.gitignore` —
-  **не коммитить и не печатать их содержимое**.
+  **не коммитить и не печатать их содержимое**. Копии базы `downloads.db.*.bak`
+  тоже в `.gitignore`, но содержат реальные данные — не публиковать.
 
 ## Соглашения для агентов
 
 - Правки держать в стиле существующего кода: корутины, `logging`, глобальный `SETTINGS`;
   без новых зависимостей без необходимости.
-- Любые изменения схемы БД делать миграцией `IF NOT EXISTS` в `Database.create()` —
-  база живая, содержит реальные данные.
+- Изменения схемы БД — новой версией в `tune_loader_bot/storage/migrations.py`
+  (+ `PRAGMA user_version`), идемпотентно и с копией базы. База живая, содержит
+  реальные данные: сначала `--check`, потом `--apply` в окне обслуживания.
 - Тесты и линт: `.venv/bin/python -m pytest`, `.venv/bin/ruff check .`. Тесты
   обязаны работать в `tmp_path`: `database.py` открывает `downloads.db`
   относительно CWD, а в `tests/conftest.py` стоит guard, который роняет тест при

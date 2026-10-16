@@ -63,6 +63,7 @@ class Settings(BaseModel):
     max_concurrent_downloads: int = Field(default=2, ge=1, alias="max-concurrent-downloads")
     tg_max_file_size: int = Field(default=DEFAULT_TG_MAX_FILE_SIZE, ge=1, alias="tg-max-file-size")
     watch_playlist_items: str = Field(default="1,2", alias="watch-playlist-items")
+    watch_tick_seconds: int = Field(default=60, ge=1, alias="watch-tick-seconds")
     whisper_enabled: bool = Field(default=True, alias="whisper-enabled")
     whisper_model: str = Field(default="turbo", alias="whisper-model")
     whisper_language: str = Field(default="ru", alias="whisper-language")

@@ -1,18 +1,15 @@
 #!/usr/bin/python3
-"""Точка входа: модель Whisper, watchdog подписок и long polling.
+"""Точка входа: watchdog подписок и long polling.
 
 Обработчики Telegram живут в `tune_loader_bot.telegram`, медиатека — в
-`tune_loader_bot.library`, watchdog — в `tune_loader_bot.jobs`, хранилище — в
-`tune_loader_bot.storage`. Здесь остались только модель Whisper (фаза 7) и
-композиция запуска (фаза 8).
+`tune_loader_bot.library`, watchdog — в `tune_loader_bot.jobs`, распознавание
+речи — в `tune_loader_bot.transcription`, хранилище — в
+`tune_loader_bot.storage`. Здесь осталась только композиция запуска (фаза 8).
 """
 
 import asyncio
 import logging
-import os
-import tempfile
 
-import whisper
 from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
 
@@ -23,27 +20,8 @@ from tune_loader_bot.storage.db import Storage
 from tune_loader_bot.telegram.delivery import Delivery
 from tune_loader_bot.telegram.dispatcher import create_dispatcher
 from tune_loader_bot.telegram.handlers import HandlerContext
-
-# D14: модель грузится на импорте модуля (~1.4 ГБ RSS) — чинится в фазе 7.
-model = whisper.load_model("turbo")
-
-
-async def transcribe_voice(message) -> str | None:
-    """Временный адаптер Whisper (в фазе 7 переедет в `transcription/`)."""
-    bot = message.bot
-    file = await bot.get_file(message.voice.file_id)
-    with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
-        file_path = tmp.name
-    try:
-        await bot.download_file(file.file_path, file_path)
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None, lambda: model.transcribe(file_path, language="ru")
-        )
-        return (result.get("text") or "").strip() or None
-    finally:
-        if os.path.exists(file_path):
-            os.remove(file_path)
+from tune_loader_bot.telegram.voice import TelegramVoiceTranscriber
+from tune_loader_bot.transcription.whisper_service import WhisperTranscriber
 
 
 async def build_runtime(settings):
@@ -58,7 +36,7 @@ async def build_runtime(settings):
         settings=settings,
         library=library,
         delivery=Delivery(settings, library),
-        transcriber=transcribe_voice,
+        transcriber=TelegramVoiceTranscriber(WhisperTranscriber(settings)),
     )
     return ctx, storage
 

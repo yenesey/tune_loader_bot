@@ -80,6 +80,8 @@ class FakeBot:
         self.audio: list[tuple[int, dict]] = []
         self.deleted: list[tuple[int, int]] = []
         self.fail_delete = fail_delete
+        self.get_file_calls: list = []
+        self.downloaded: list[tuple[str, str]] = []
         self._counter = 0
 
     async def send_message(self, chat_id, text, **kwargs):
@@ -99,6 +101,19 @@ class FakeBot:
         if self.fail_delete:
             raise RuntimeError("delete failed")
         self.deleted.append((chat_id, message_id))
+
+    async def get_file(self, file_id=None):
+        self.get_file_calls.append(file_id)
+        return FakeFile()
+
+    async def download_file(self, file_path, destination):
+        self.downloaded.append((str(file_path), str(destination)))
+        Path(destination).write_bytes(b"ogg-bytes")
+
+
+class FakeFile:
+    def __init__(self, file_path: str = "voice/file.ogg") -> None:
+        self.file_path = file_path
 
 
 class FakeCallbackQuery:

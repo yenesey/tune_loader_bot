@@ -17,6 +17,7 @@ from tune_loader_bot.storage.db import Storage
 from tune_loader_bot.telegram.delivery import Delivery
 from tune_loader_bot.telegram.dispatcher import create_dispatcher
 from tune_loader_bot.telegram.handlers import HandlerContext
+from tune_loader_bot.telegram.voice import TelegramVoiceTranscriber
 
 
 async def test_build_runtime_wires_everything(bot_module, settings):
@@ -27,7 +28,7 @@ async def test_build_runtime_wires_everything(bot_module, settings):
         assert isinstance(ctx.library, MediaLibrary)
         assert isinstance(ctx.delivery, Delivery)
         assert ctx.settings is settings
-        assert ctx.transcriber is bot_module.transcribe_voice
+        assert isinstance(ctx.transcriber, TelegramVoiceTranscriber)
         assert storage.path == Path("downloads.db")
         assert Path("downloads.db").exists()
     finally:
@@ -59,6 +60,30 @@ async def test_watcher_is_built_from_context(bot_module, settings):
         await storage.close()
 
 
-async def test_whisper_model_is_loaded_once_via_stub(bot_module, whisper_stub):
-    """В тестах модель подменена заглушкой: ни torch, ни 1.4 ГБ RSS."""
-    assert isinstance(bot_module.model, type(whisper_stub.load_model()))
+def test_importing_bot_does_not_load_whisper(project, monkeypatch):
+    """D14: раньше `import bot` тянул torch и ~1.4 ГБ RSS."""
+    import importlib
+    import sys
+    import types
+
+    sentinel = types.ModuleType("whisper")
+    loaded: list = []
+    sentinel.load_model = lambda *args, **kwargs: loaded.append(args) or types.SimpleNamespace()
+    monkeypatch.setitem(sys.modules, "whisper", sentinel)
+    sys.modules.pop("bot", None)
+    try:
+        importlib.import_module("bot")
+        assert loaded == [], "модель не должна грузиться на импорте"
+    finally:
+        sys.modules.pop("bot", None)
+
+
+async def test_transcriber_is_lazy_until_first_voice(bot_module, settings):
+    """Модель не грузится ни при импорте, ни при сборке runtime (D14)."""
+    ctx, storage = await bot_module.build_runtime(settings)
+    try:
+        assert isinstance(ctx.transcriber, TelegramVoiceTranscriber)
+        assert ctx.transcriber.enabled is True
+        assert ctx.transcriber.model_loaded is False
+    finally:
+        await storage.close()

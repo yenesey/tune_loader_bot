@@ -9,6 +9,8 @@
 
 import pytest
 
+from tune_loader_bot.domain import services
+
 DIALOG_TEXT = "Может качнем эту ☝ ссылку?"
 
 
@@ -39,3 +41,14 @@ def test_dialog_unknown_service_raises_key_error(bot_module):
     """Неизвестный сервис → KeyError: вызывающий обязан проверить `check_url`."""
     with pytest.raises(KeyError):
         bot_module.create_download_dialog("unknown-service")
+
+
+@pytest.mark.parametrize("spec", services.SERVICE_SPECS, ids=lambda spec: spec.name)
+def test_dialog_buttons_come_from_registry(bot_module, spec):
+    """Фаза 4: набор кнопок берётся из реестра, а не из локального словаря."""
+    dialog = bot_module.create_download_dialog(spec.name)
+
+    labels = [text for text, _ in _buttons(dialog["reply_markup"])]
+    expected = [{"audio": "🎶Audio", "video": "📺Video"}[fmt] for fmt in services.formats(spec.name)]
+
+    assert labels == [*expected, "❌"]

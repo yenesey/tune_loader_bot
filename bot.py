@@ -1,310 +1,133 @@
 #!/usr/bin/python3
+"""Точка входа: модель Whisper, watchdog подписок и long polling.
+
+Обработчики Telegram живут в `tune_loader_bot.telegram`, медиатека — в
+`tune_loader_bot.library`, хранилище — в `tune_loader_bot.storage`. Здесь
+осталось только то, что ещё не разобрано по фазам: загрузка модели Whisper
+(фаза 7), watchdog (фаза 6) и композиция запуска (фаза 8).
+"""
+
 import asyncio
 import logging
 import os
 import tempfile
-import traceback
 from datetime import datetime, timedelta
-from typing import Any, Awaitable, Callable, Dict
 
 import whisper
-from aiogram import Bot, Dispatcher  # , Router
+from aiogram import Bot
 from aiogram.client.default import DefaultBotProperties
-from aiogram.dispatcher.middlewares.base import BaseMiddleware
-from aiogram.filters import StateFilter
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import (
-    CallbackQuery,
-    FSInputFile,
-    InlineKeyboardButton,
-    InputMediaAudio,
-    InputMediaVideo,
-    Message,
-    TelegramObject,
-)
-from aiogram.utils.keyboard import InlineKeyboardBuilder
-from aiogram.utils.markdown import hlink
 
-from database import Database
+from download import download_playlist
+from tune_loader_bot.config import get_settings
+from tune_loader_bot.library import MediaLibrary
+from tune_loader_bot.storage.db import Storage
+from tune_loader_bot.telegram.delivery import Delivery
+from tune_loader_bot.telegram.dispatcher import create_dispatcher
+from tune_loader_bot.telegram.handlers import HandlerContext
 
-######################################################################
-from download import download_media, download_playlist
+LOGGER = logging.getLogger(__name__)
 
-# from watchdog import watchdog
-from settings import SETTINGS
-from tune_loader_bot.domain import services
-from tune_loader_bot.media.paths import enrich_info, sub_dir
+WATCHDOG_TICK_SECONDS = 60
 
-######################################################################
-USER_DATA = {}
-TG_MAX_FILE_SIZE = 50 * 1024 * 1024
-DB = Database()
+# D14: модель грузится на импорте модуля (~1.4 ГБ RSS) — чинится в фазе 7.
 model = whisper.load_model("turbo")
 
-######################################################################
-class DownloadActions(StatesGroup):
-    select_action = State()
 
-
-class WatchdogActions(StatesGroup):
-    select_action = State()
-
-
-######################################################################
-class SecurityMiddleware(BaseMiddleware):
-    async def __call__(
-        self,
-        handler: Callable[[TelegramObject, Dict[str, Any]], Awaitable[Any]],
-        event: TelegramObject,
-        data: Dict[str, Any],
-    ) -> Any:
-        if "event_from_user" in data:
-            user = data["event_from_user"]
-            if user.id not in SETTINGS["users-list"]:
-                logging.info(f"Unknown user: {str(user.id)}")
-                logging.info(f"message.text: {data.keys()}")
-                return
-        return await handler(event, data)
-
-
-##############################################################
-# `sub_dir`/`enrich_info` переехали в медиа-слой (фаза 3): правило раскладки
-# файлов и публичные ссылки живут в одном месте.
-
-
-async def find(url: str, video: bool) -> dict | None:
-    found = await DB.find_url(url, video)
-    if found:
-        return enrich_info(found)
-
-
-async def download(url: str, video: bool, user_id: str | None) -> dict | None:
-    date = datetime.now()
-    target_dir = f"{SETTINGS['download-dir']}/{sub_dir(date)}"
-    if not os.path.isdir(target_dir):
-        os.makedirs(target_dir)
-    service = check_url(url)
-    loaded = await download_media(target_dir, service, url, video)
-    if loaded:
-        loaded["date"] = date
-        loaded["user_id"] = user_id
-        loaded["url"] = url
-        loaded["video"] = int(video)
-        loaded["delivered"] = int(False)
-        await DB.save_download(loaded)
-        loaded = enrich_info(loaded)
-    return loaded
-
-
-async def process_message(message: Message, video: bool):
-    if not message.text:
-        return
-    url = message.text or ""
-    InputMedia = InputMediaVideo if video else InputMediaAudio
-    try:
-        instant_answer = await message.answer("Processing. Please wait for a while...")
-        user_id = str(message.from_user.id) if message.from_user else None
-        result = await find(url, video)
-        if not result:
-            result = await download(url, video, user_id)
-        if result:
-            if result["file_size"] < TG_MAX_FILE_SIZE:
-                await instant_answer.edit_media(
-                    InputMedia(
-                        media=FSInputFile(result["file_path"]),
-                        title=result["title"],
-                        performer=result["performer"],
-                        caption=hlink("#origin", url)
-                        + "  "
-                        + hlink("#file", result["server_url"]),
-                    )
-                )
-            else:
-                await instant_answer.edit_text(
-                    hlink(result["link_text"], result["server_url"])
-                    + "\n"
-                    + hlink("#origin", url)
-                )
-            await message.delete()
-        else:
-            await message.answer("Something went wrong...")
-
-    except Exception:
-        logging.error(traceback.format_exc())
-        await message.answer("Something went wrong...")
-
-
-##############################################################
-def check_url(url):
-    """Имя сервиса по ссылке (или `None`). Знание о сервисах — в реестре (фаза 4)."""
-    service = services.match(url)
-    return service.name if service else None
-
-
-def create_download_dialog(key) -> dict:
-    # KeyError на неизвестном сервисе: вызывающий обязан сначала проверить check_url
-    available = services.formats(key)
-
-    buttons = {
-        "audio": ("🎶Audio", "audio"),
-        "video": ("📺Video", "video"),
-    }
-
-    kbd = InlineKeyboardBuilder()
-    text_and_data = [buttons[btn] for btn in available] + [("❌", "exit")]
-    row_btns = (
-        InlineKeyboardButton(text=text, callback_data=data)
-        for text, data in text_and_data
-    )
-    kbd.row(*row_btns)
-    return {"text": "Может качнем эту ☝ ссылку?", "reply_markup": kbd.as_markup()}
-
-
-dp = Dispatcher()
-
-
-@dp.callback_query(StateFilter(DownloadActions.select_action))
-async def inline_kb_answer_callback_handler(query: CallbackQuery, state: FSMContext):
-    await query.answer()
-    if query.bot and query.message:
-        await query.bot.delete_message(
-            chat_id = query.message.chat.id, message_id = query.message.message_id
-        )
-    if query.data != "exit":
-        await process_message(USER_DATA[query.from_user.id], query.data == "video")
-    await state.clear()
-
-
-@dp.message()
-async def on_process_message(message: Message, state: FSMContext):
-    if message and message.text:
-        service = check_url(message.text)
-        if service:
-            if message.from_user:
-                USER_DATA[message.from_user.id] = message
-            await message.answer(**create_download_dialog(service))
-            await state.set_state(DownloadActions.select_action)
-    if message and message.voice:
-        await transcribe_message(message)
-
-@dp.channel_post()
-async def on_process_channel_post(message: Message):
-    if message and message.text:
-        service = check_url(message.text)
-        if service:
-            await process_message(message, False)
-    if message and message.voice:
-        await transcribe_message(message)
-
-
-##############################################################
-async def transcribe_message(message: Message):
+async def transcribe_voice(message) -> str | None:
+    """Временный адаптер Whisper (в фазе 7 переедет в `transcription/`)."""
     bot = message.bot
-    if message and message.voice:
-        file = await bot.get_file(message.voice.file_id)
+    file = await bot.get_file(message.voice.file_id)
     with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
         file_path = tmp.name
-        await bot.download_file(file.file_path, file_path)
-
     try:
-        # 3. Транскрипция через Whisper (запускаем в отдельном потоке, чтобы не блокировать event loop)
-        loop = asyncio.get_event_loop()
+        await bot.download_file(file.file_path, file_path)
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
-            None,  # использует стандартный ThreadPoolExecutor
-            lambda: model.transcribe(file_path, language="ru")  # явно указываем русский язык
+            None, lambda: model.transcribe(file_path, language="ru")
         )
-        transcript = result["text"].strip()
-
-        # 4. Отправляем текст обратно в канал (как ответ на сообщение)
-        if transcript:
-            await message.reply(f"🎤 Распознано:\n\n{transcript}")
-        else:
-            await message.reply("Не удалось распознать речь.")
-    except Exception as e:
-        await message.reply(f"Ошибка распознавания: {e}")
+        return (result.get("text") or "").strip() or None
     finally:
-        # 5. Удаляем временный файл
         if os.path.exists(file_path):
             os.remove(file_path)
 
-async def send_audio_message(bot: Bot, download):
-    if download["file_size"] < TG_MAX_FILE_SIZE:
-        await bot.send_audio(
-            download["user_id"],
-            FSInputFile(download["file_path"]),
-            title=download["title"],
-            performer=download["performer"],
-            caption=hlink("#origin", download["url"])
-            + "  "
-            + hlink("#file", download["server_url"]),
-        )
-    else:
-        await bot.send_message(
-            download["user_id"],
-            hlink(download["link_text"], download["server_url"])
-            + "\n"
-            + hlink("#origin", download["url"]),
-        )
-    download["delivered"] = int(True)
-    await DB.save_download(download)
 
-
-def scan_playlist(sub, playlist):
+def scan_playlist(keywords: str | None, playlist) -> list[str]:
+    """Отбирает ссылки из плейлиста по ключевым словам (фаза 6 перепишет)."""
     urls = []
-    for ent in playlist:
-        if sub["keywords"]:
-            for kwd in sub["keywords"].split(","):
-                if kwd in ent["title"]:
-                    urls.append(ent["url"])
+    for entry in playlist:
+        if keywords:
+            for keyword in keywords.split(","):
+                if keyword in entry["title"]:
+                    urls.append(entry["url"])
         else:
-            urls.append(ent["url"])
+            urls.append(entry["url"])
     urls.reverse()  # elders first
     return urls
 
 
-async def watchdog(bot: Bot, DB: Database):
+async def watchdog(bot: Bot, ctx: HandlerContext) -> None:
+    """Следит за подписками (фаза 6 вынесет это в `jobs/watchdog.py`)."""
     while True:
-        await asyncio.sleep(60)
+        await asyncio.sleep(WATCHDOG_TICK_SECONDS)
         try:
-            subscriptions = await DB.get_subscriptions()
-            for sub in subscriptions:
+            for sub in await ctx.library.storage.subscriptions():
                 if (
-                    sub["last_check"] is None
-                    or sub["last_check"] + timedelta(seconds=sub["interval"])
-                    < datetime.now()
+                    sub.last_check is not None
+                    and sub.last_check + timedelta(seconds=sub.interval) > datetime.now()
                 ):
-                    sub["last_check"] = datetime.now()
-                    await DB.save_subscription(sub)
+                    continue
 
-                    playlist = await download_playlist(sub["url"], "1,2")
-                    for url in scan_playlist(sub, playlist):
-                        result = await DB.find_url(url, False, sub["user_id"])
-                        if result:
-                            if not result["delivered"]:
-                                logging.info(
-                                    f"download {url} not delivered: trying resend"
-                                )
-                                result = enrich_info(result)
-                                result["url"] = url
-                                result["user_id"] = sub["user_id"]
-                                result["video"] = int(False)
-                                await send_audio_message(bot, result)
-                        else:
-                            result = await download(url, False, sub["user_id"])
-                            if result:
-                                await send_audio_message(bot, result)
+                # D13: время проверки сохраняется до самой проверки — фаза 6.
+                sub.last_check = datetime.now()
+                await ctx.library.storage.save_subscription(sub)
+
+                playlist = await download_playlist(sub.url, "1,2")
+                for url in scan_playlist(sub.keywords, playlist):
+                    record = await ctx.library.find(url, False, sub.user_id)
+                    if record is not None:
+                        if not record.get("delivered"):
+                            LOGGER.info("запись %s не доставлена — повторная отправка", url)
+                            await ctx.delivery.send_to_chat(bot, sub.user_id, record)
+                        continue
+
+                    record = await ctx.library.download(url, False, sub.user_id)
+                    if record is not None:
+                        await ctx.delivery.send_to_chat(bot, sub.user_id, record)
         except Exception:
-            logging.error(traceback.format_exc())
+            LOGGER.exception("ошибка в watchdog")
 
 
-async def main():
-    global DB
-    DB = await Database.create()
-    bot = Bot(token=SETTINGS["telegram-api-token"],  default=DefaultBotProperties(parse_mode="HTML"))
-    _watchdog = asyncio.create_task(watchdog(bot, DB))
-    _polling = dp.start_polling(bot)
-    await asyncio.gather(_watchdog, _polling)
+async def build_runtime(settings):
+    """Собирает зависимости приложения (используют `main` и тесты).
+
+    Возвращает контекст обработчиков и хранилище: само хранилище нужно `main`,
+    чтобы закрыть соединение при остановке.
+    """
+    storage = await Storage.open(settings.db_path)
+    library = MediaLibrary(settings, storage)
+    ctx = HandlerContext(
+        settings=settings,
+        library=library,
+        delivery=Delivery(settings, library),
+        transcriber=transcribe_voice,
+    )
+    return ctx, storage
+
+
+async def main() -> None:
+    settings = get_settings()
+    ctx, storage = await build_runtime(settings)
+    dispatcher = create_dispatcher(ctx)
+    bot = Bot(
+        token=settings.telegram_api_token, default=DefaultBotProperties(parse_mode="HTML")
+    )
+
+    watcher = asyncio.create_task(watchdog(bot, ctx))
+    try:
+        await dispatcher.start_polling(bot)
+    finally:
+        watcher.cancel()
+        await storage.close()
 
 
 if __name__ == "__main__":
@@ -313,5 +136,4 @@ if __name__ == "__main__":
         level=logging.INFO,
         datefmt="%Y-%m-%d %H:%M:%S",
     )
-    dp.update.outer_middleware(SecurityMiddleware())
     asyncio.run(main())

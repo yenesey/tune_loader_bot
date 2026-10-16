@@ -83,7 +83,7 @@ Severity: **C** — ломает данные/прод, **H** — заметны
 | D6 | H | Хук `MoveFiles`: `os.path.getsize(filepath)` без проверки существования, `os.path.basename(info.get("filepath"))` при `None` → исключение внутри хука, `result = None`, `file_size = None`; далее `result["file_size"] < TG_MAX_FILE_SIZE` → `TypeError`. Латентно: в живой БД `file_size IS NULL` — 0 строк | `download.py:58-69`, `bot.py:136` | ✅ 3 |
 | D7 | H | `find_url(url, video)` без `user_id` возвращает произвольную строку (первую по индексу) → чужой `delivered`/метаданные, «кэш» не привязан к пользователю. Файл на диске не проверяется, хотя каталог ~93 ГБ и чистится | `database.py:67-91`, `bot.py:100-104` | ◐ 2 |
 | D8 | H | `ON CONFLICT ... DO UPDATE SET delivered = excluded.delivered` — повторная загрузка не обновляет `file_size`/`title`/`artist`/`channel`/`date`, `None`-размер остаётся навсегда (латентно: в живой БД таких строк 0) | `database.py:61-62` | ✅ 2 |
-| D9 | M | `USER_DATA` — обычный dict с объектами `Message`: течёт, теряется при рестарте (callback → `KeyError`), не учитывает несколько чатов на пользователя | `bot.py:43, 224, 234` | — |
+| D9 | M | `USER_DATA` — обычный dict с объектами `Message`: течёт, теряется при рестарте (callback → `KeyError`), не учитывает несколько чатов на пользователя | `bot.py:43, 224, 234` | ✅ 5 |
 | D10 | M | `create_download_dialog`: `("audio")` — это строка, а не кортеж, поэтому `btn in options[key]` работает как поиск подстроки; набор форматов и параметры yt-dlp описаны в двух несвязанных местах | `bot.py:186-210`, `download.py:86-89` | ✅ 4 |
 | D11 | M | `check_url`: незаэкранированные точки (`www.`, `.be/`), необязательный префикс `youtu(?:...)?` → совпадёт `https://youtubeevil.com/...`; нет нормализации хоста/регистра; rutube/coub/instagram — сложные regex без тестов | `bot.py:163-182` | ✅ 4 |
 | D12 | M | `datetime.strptime(..., "%Y-%m-%d %H:%M:%S.%f")` без fallback: строка без микросекунд (или записанная другим инструментом) валит весь тик watchdog; `find_url` режет `fetch[0][:10]`; `datetime.now()` без tz | `database.py:81, 105`, `bot.py:323-326` | ✅ 2 |
@@ -93,13 +93,13 @@ Severity: **C** — ломает данные/прод, **H** — заметны
 | D16 | M | `requirements.txt` — полный freeze с транзитивными зависимостями, без whisper/torch и без dev-зависимостей; расходится с venv: yt-dlp 2026.3.17 vs 2026.8.19, aiosqlite 0.22.1 vs 0.21.0 | `requirements.txt` | ✅ 0 |
 | D17 | M | `settings.py`: `json.load(open('settings.json'))` на импорте, без валидации и внятной ошибки, путь зависит от CWD | `settings.py:15-18` | ✅ 1 |
 | D18 | L | systemd: `StandardOutput=file:` **обрезает лог** при каждом рестарте, `Description=Torrent Manager Bot`, `SyslogIdentifier=torrent-manager-bot`, запуск через `bash -c "source .venv/bin/activate"` | `install-service-systemd.sh:51,55,56,65` | — |
-| D19 | L | Нет graceful shutdown: БД не закрывается, watchdog-задача не отменяется; middleware регистрируется только под `__main__`, поэтому тестируемый `dp` не равен боевому | `bot.py:350-366` | — |
+| D19 | L | Нет graceful shutdown: БД не закрывается, watchdog-задача не отменяется; middleware регистрируется только под `__main__`, поэтому тестируемый `dp` не равен боевому | `bot.py:350-366` | ◐ 5 |
 | D20 | L | `enrich_info` мутирует входной dict, молча возвращает `None`, склеивает путь f-строкой; `sub_dir`/`server_url` — единственное место, где живёт правило раскладки файлов | `bot.py:75-97` | ✅ 3 |
-| D21 | L | Логика доставки продублирована: `process_message` (edit_media) и `send_audio_message` (send_audio) строят одинаковые подписи `hlink("#origin")/#file` | `bot.py:124-159, 280-299` | — |
+| D21 | L | Логика доставки продублирована: `process_message` (edit_media) и `send_audio_message` (send_audio) строят одинаковые подписи `hlink("#origin")/#file` | `bot.py:124-159, 280-299` | ✅ 5 |
 | D22 | L | Захардкоженный путь к Deno и `cookies.txt` относительно `os.getcwd()` на импорте | `download.py:25-26` | ✅ 3 |
 | D23 | L | Нет `noplaylist` для одиночной ссылки: вставленный URL плейлиста/канала уедет в веерную загрузку | `download.py:91-94` | ✅ 3 |
 | D24 | L | `download_playlist` возвращает `info["entries"]` без проверки `info`/`entries` → `None` превращается в `TypeError` в `scan_playlist` | `download.py:101-106`, `bot.py:302-312` | ✅ 3 |
-| D25 | L | Логирование настраивается только в `__main__`; `logging.error(traceback.format_exc())` вместо `logging.exception`; `SecurityMiddleware` печатает `data.keys()` (шум + приватность) | `bot.py:68-69, 158, 347, 360-364` | — |
+| D25 | L | Логирование настраивается только в `__main__`; `logging.error(traceback.format_exc())` вместо `logging.exception`; `SecurityMiddleware` печатает `data.keys()` (шум + приватность) | `bot.py:68-69, 158, 347, 360-364` | ◐ 5 |
 
 ---
 
@@ -112,6 +112,7 @@ tune_loader_bot/                # пакет (ставится/запускае�
 ├── app.py                      # composition root: config → db → media → bot/dp → jobs
 ├── config.py                   # Settings (dataclass/pydantic) + load_settings(path) + валидация
 ├── logging_setup.py            # единая настройка логов, уровень из конфига
+├── library.py                  # медиатека: найти готовое или скачать и запомнить
 ├── domain/
 │   ├── models.py               # Download, Subscription (dataclass, from_row/to_row)
 │   └── services.py             # ServiceSpec-реестр: match(url), formats, ytdlp-параметры
@@ -297,6 +298,14 @@ DoD: golden-таблица URL (~40 кейсов, включая `youtu.be`, `mu
 DoD: тесты через `dp.feed_update(recording_bot, Update(...))`: чужой user_id
 отбрасывается, ЛС со ссылкой → клавиатура, callback → вызов доставки (с фейковым
 media), устаревший callback не падает, channel_post скачивается как audio.
+
+Факт (16.10.2026): сделано. Появились `telegram/` (тексты, клавиатура, подписи,
+доставка, обработчики, middleware, `create_dispatcher`), `library.py`
+(прикладной слой «медиатека») и `build_runtime()` в `bot.py`; `bot.py` похудел с
+317 до ~150 строк и больше не содержит обработчиков. Ручные заглушки aiogram
+(в 3.28.2 нет `MockedBot`) плюс сквозной тест через настоящий
+`Dispatcher.feed_update` с сессией-заглушкой. Переходные `settings.py` и
+`database.py` в рантайме больше никем не используются — удаляются в фазе 8.
 
 ### Фаза 6. Watchdog (0.5–1 день)
 
@@ -500,7 +509,7 @@ Non-goals: смена СУБД, веб-интерфейс, изменение п
 | 2. Хранилище и миграции | 🟡 | `refactor/phase-2` | 115 тестов; миграция прогнана на копии живой БД (2065 записей, integrity ok); сама живая БД ждёт окна | 2026-10-16 |
 | 3. Медиа-слой / yt-dlp | ✅ | `refactor/phase-3` | 159 тестов, ruff clean; опции и скачивание проверены на живом yt-dlp (mp3 4.9 МБ в /tmp) | 2026-10-16 |
 | 4. Реестр сервисов | ✅ | `refactor/phase-4` | 231 тест, ruff clean; сверка со старым кодом на 2050 реальных ссылках — 0 регрессий | 2026-10-16 |
-| 5. Telegram-слой | ⬜ | — | — | — |
+| 5. Telegram-слой | ✅ | `refactor/phase-5` | 282 теста, ruff clean; сквозной прогон через `feed_update`, живая БД не тронута | 2026-10-16 |
 | 6. Watchdog | ⬜ | — | — | — |
 | 7. Транскрипция | ⬜ | — | — | — |
 | 8. Композиция, эксплуатация, документация | ⬜ | — | — | — |
@@ -566,3 +575,13 @@ Non-goals: смена СУБД, веб-интерфейс, изменение п
   распознаются `http://`, `m.youtube.com`, `snd.sc`). Сверка со старым `check_url`
   на 2050 реальных ссылках из живой базы: 0 регрессий · 231 passed, ruff clean,
   живая БД без изменений · коммит `f0d4fbe`, merge `b3be61a`
+- 2026-10-16 · 5 · фаза 5: `telegram/` (texts, keyboards, captions, delivery,
+  handlers, middleware, `create_dispatcher`), `library.py` (медиатека: найти
+  готовое или скачать; проверяет файл на диске), `bot.py` стал тонкой точкой
+  входа (`build_runtime`, whisper-адаптер, watchdog, polling — 317 → ~150 строк).
+  `USER_DATA` заменён на FSM-данные: рестарт больше не даёт `KeyError`, а
+  несколько чатов одного пользователя не перетирают друг друга (D9); доставка и
+  подписи собраны в одном месте (D21); middleware регистрируется в фабрике (D19);
+  логи без дампа `data.keys()` (D25). Заглушки aiogram написаны вручную (в 3.28.2
+  нет `MockedBot`) + сквозной тест через `Dispatcher.feed_update` с
+  сессией-заглушкой · 282 passed, ruff clean, живая БД без изменений · —

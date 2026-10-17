@@ -1,13 +1,10 @@
 """Слой доступа к SQLite через aiosqlite.
 
-Заменяет старый singleton `database.Database` (D15): соединение больше не живёт
-в классовом атрибуте, путь задаётся явно, есть `close()`, а схема приводится
-миграциями (`storage/migrations.py`) вместо `CREATE TABLE IF NOT EXISTS` в
-конструкторе.
+Соединение живёт в экземпляре (а не в атрибуте класса), путь задаётся явно,
+есть `close()`, а схема приводится миграциями (`storage/migrations.py`).
 
 Методы работают с доменными моделями (`Download`, `Subscription`); для
-dict-совместимости есть `Download.coerce`/`to_legacy_dict` — переходный
-`database.py` использует их, пока `bot.py` не переписан (фазы 5-6).
+dict-совместимости есть `Download.coerce`/`to_legacy_dict`.
 """
 
 from __future__ import annotations
@@ -76,8 +73,7 @@ class Storage:
         """Открывает базу, включает WAL и (по умолчанию) применяет миграции.
 
         WAL — persistent-свойство файла: включив его один раз, база продолжает
-        работать в этом режиме. Для живой `downloads.db` это меняется при первом
-        запуске нового кода (см. REFACTORING_PLAN.md, §5).
+        работать в этом режиме.
         """
         db_path = Path(path)
         connection = await aiosqlite.connect(db_path)
@@ -116,9 +112,9 @@ class Storage:
     ) -> Download | None:
         """Ищет запись по ссылке.
 
-        `user_id=None` — «любой пользователь» (так искал старый `find_url`); но
-        выбор детерминирован: самая свежая запись, а не произвольная строка
-        (D7). Явная проверка файла на диске — задача слоя доставки (фаза 3/5).
+        `user_id=None` — «любой пользователь»; выбор детерминирован: самая
+        свежая запись, а не произвольная строка. Проверка файла на диске —
+        в `MediaLibrary.find`.
         """
         sql = f"SELECT {DOWNLOAD_COLUMNS} FROM downloads WHERE url = ? AND video = ?"
         params: list[Any] = [url, int(video)]

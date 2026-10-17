@@ -9,9 +9,7 @@
   aiogram), ключи JSON сохраняются через alias'ы (`download-dir` → `download_dir`);
 * `load_settings()` — чистая функция чтения конкретного файла;
 * `get_settings()` — кэшированный синглтон для рантайма;
-* `Settings.as_legacy_dict()` — переходный dict со старыми ключами, чтобы
-  `bot.py`/`download.py` продолжали работать через `settings.SETTINGS`
-  до фаз 3-6 (см. REFACTORING_PLAN.md).
+* `Settings.as_legacy_dict()` — плоский dict с исходными (дефисными) ключами.
 """
 
 from __future__ import annotations

@@ -51,15 +51,10 @@ tail -f /var/log/tune-loader-bot.log
 
 ## База данных
 
-SQLite (`downloads.db`, путь — настройка `db-path`), версия схемы в
-`PRAGMA user_version`. Миграции идемпотентны и перед применением к существующей
-базе делают копию `downloads.db.<timestamp>.bak`:
-
-```bash
-.venv/bin/python -m tune_loader_bot.migrate --report   # сводка (только чтение)
-.venv/bin/python -m tune_loader_bot.migrate --check    # что будет сделано
-.venv/bin/python -m tune_loader_bot.migrate --apply    # применить
-```
+SQLite (`downloads.db`, путь — настройка `db-path`). Схема создаётся и
+обновляется автоматически при старте (`tune_loader_bot/storage/migrations.py`,
+версия в `PRAGMA user_version`); перед изменением существующей базы делается
+копия `downloads.db.<timestamp>.bak`.
 
 ## Разработка
 
@@ -101,8 +96,3 @@ tune_loader_bot/
 `whisper-model`, `whisper-language`, `log-level`.
 
 Путь к файлу настроек можно переопределить переменной `TUNE_LOADER_SETTINGS`.
-
-## План рефакторинга
-
-История поэтапного рефакторинга, карта дефектов (D1-D25) и журнал прогресса —
-в [REFACTORING_PLAN.md](REFACTORING_PLAN.md).

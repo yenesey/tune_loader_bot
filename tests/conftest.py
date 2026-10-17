@@ -3,10 +3,10 @@
 Правила:
 * тесты **не** читают рабочие `settings.json`/`downloads.db`/`cookies.txt` и не
   пишут в каталог загрузок: каждый тест живёт в своём `tmp_path`;
-* `whisper` подменяется заглушкой, поэтому тесты не тянут torch и не грузят
-  модель (см. REFACTORING_PLAN.md, D14);
+* тяжёлые зависимости (`whisper`/torch, сеть, Telegram) в тестах не задействованы:
+  подменяются заглушками (`tests/fakes.py`, фейковые `YoutubeDL` и сессия);
 * модули проекта импортируются заново в изолированном окружении, чтобы не
-  «протекало» состояние между тестами (кэш `sys.modules`, `settings.SETTINGS`);
+  «протекало» состояние между тестами (кэш `sys.modules`);
 * живая `downloads.db` открывается **только** на чтение и только для того, чтобы
   снять с неё копию в `tmp_path`: миграции проверяются на копии.
 """
@@ -22,7 +22,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 LIVE_DB = REPO_ROOT / "downloads.db"
 
 #: Схема живой базы **до** миграций: без `artist`/`channel`/`delivered`,
-#: `user_id` допускает NULL, версия схемы 0 (см. D1/D2 в REFACTORING_PLAN.md).
+#: `user_id` допускает NULL, версия схемы 0.
 LEGACY_SCHEMA = """
 CREATE TABLE downloads (
     date DATETIME, user_id STRING, url STRING, video BOOLEAN,
@@ -47,10 +47,9 @@ def _stat(path: Path):
 def isolated_cwd(tmp_path, monkeypatch):
     """Каждый тест выполняется в своём CWD, а живая БД защищена от изменений.
 
-    Это не формальность: `database.py` открывает базу относительно CWD, поэтому
-    тест, забывший про изоляцию, пишет прямо в рабочую базу (инцидент
-    16.10.2026, см. журнал в REFACTORING_PLAN.md). Guard сравнивает
-    mtime/size/inode живой базы до и после теста.
+    Это не формальность: путь к базе по умолчанию относительный (`downloads.db`),
+    поэтому тест, забывший про изоляцию, пишет прямо в рабочую базу (инцидент
+    16.10.2026). Guard сравнивает mtime/size/inode живой базы до и после теста.
     """
     before = _stat(LIVE_DB)
     monkeypatch.chdir(tmp_path)

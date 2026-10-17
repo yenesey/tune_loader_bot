@@ -252,8 +252,8 @@ def build_options(
         )
         return options
 
-    options["noplaylist"] = True  # D23
-    # Селектор формата — знание о сервисе, поэтому живёт в реестре (фаза 4).
+    options["noplaylist"] = True  # не разворачивать плейлист в одиночную загрузку
+    # Селектор формата — знание о сервисе, поэтому живёт в реестре.
     options["format"] = services.format_selector(service, video)
     options["postprocessors"] = (
         [{"key": "FFmpegVideoConvertor", "preferedformat": "mp4"}]

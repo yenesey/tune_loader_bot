@@ -7,9 +7,7 @@ Telegram-бот, который по ссылке скачивает аудио 
 
 Весь код — в пакете `tune_loader_bot/`; в корне только настройки, скрипты и
 документация. Запуск — `python -m tune_loader_bot` (systemd-юнит использует именно
-его). Есть тесты (pytest) и линт (ruff), CI на GitHub Actions. Поэтапный
-рефакторинг завершён (фазы 0-8): план, карта дефектов и журнал прогресса — в
-`REFACTORING_PLAN.md`.
+его). Есть тесты (pytest) и линт (ruff), CI на GitHub Actions.
 
 ## Стек
 
@@ -34,9 +32,8 @@ Telegram-бот, который по ссылке скачивает аудио 
 | `tune_loader_bot/` | Пакет: `app.py` (композиция), `__main__.py`, `config.py`, `logging_setup.py`, `library.py`, `migrate.py` и подпакеты `domain/`, `media/`, `storage/`, `telegram/`, `jobs/`, `transcription/` |
 | `pyproject.toml` | Конфиг ruff, pytest и coverage (проект запускается из корня, без установки пакета) |
 | `.github/workflows/ci.yml` | CI: `ruff check` + `pytest` с порогом покрытия 85% |
-| `README.md` | Описание проекта, запуск, миграции, структура |
+| `README.md` | Описание проекта, запуск, структура |
 | `tests/` | pytest-тесты: герметичные (временный CWD), живая БД защищена guard'ом |
-| `REFACTORING_PLAN.md` | План рефакторинга, карта дефектов (D1-D25) и журнал прогресса |
 | `settings.example.json` | Образец настроек без секретов (в git) |
 | `settings.json` | **Секреты и пути** (в `.gitignore`): токен бота, po-token'ы YouTube, `download-dir`, `server-root-url`, `users-list` |
 | `cookies.txt` | Cookies для yt-dlp (в `.gitignore`) |
@@ -95,14 +92,6 @@ Telegram-бот, который по ссылке скачивает аудио 
   `foreign_keys=ON`, `row_factory=aiosqlite.Row`.
 - Представление `v_users` (в коде не используется) — маппинг user_id на имена.
 
-Проверка и миграция:
-
-```bash
-.venv/bin/python -m tune_loader_bot.migrate --report   # сводка (только чтение)
-.venv/bin/python -m tune_loader_bot.migrate --check    # что будет сделано
-.venv/bin/python -m tune_loader_bot.migrate --apply    # применить (копия *.bak)
-```
-
 ## Запуск и деплой
 
 ```bash
@@ -115,13 +104,10 @@ journalctl/tail -f tune-loader-bot.log
 
 Требуется `settings.json` в CWD, `cookies.txt` для YouTube и Яндекс.Музыки и Deno
 (`deno-path` → `PATH` → `~/.deno/bin/deno`).
-Миграции базы — `.venv/bin/python -m tune_loader_bot.migrate --report|--check|--apply`.
 
 ## Известные особенности и подводные камни
 
-Актуальный список дефектов (D1-D25) и статус закрытия — в `REFACTORING_PLAN.md`
-(§1 и §8, там же колонка «Закрыт»). Фазы 0-8 закрыты: из D1-D25 открытым остаётся
-только D5 (имена файлов, см. ниже).
+Ниже — то, что важно помнить при доработках.
 
 Знание о сервисах — только в `tune_loader_bot/domain/services.py` (домены,
 форматы, селекторы yt-dlp). Не дублировать регулярки и наборы форматов в
@@ -133,8 +119,8 @@ journalctl/tail -f tune-loader-bot.log
 
 Deno ищется в порядке `deno-path` → `PATH` → `~/.deno/bin/deno`. Под systemd
 `PATH` минимальный (`~/.deno/bin` в него не входит), поэтому без настройки
-`deno-path` работает только третий шаг — на нём YouTube и держится (регрессия
-16.10.2026: без JS-рантайма yt-dlp не решает n-challenge и пишет
+`deno-path` работает только третий шаг — на нём YouTube и держится (без
+JS-рантайма yt-dlp не решает n-challenge и пишет
 `Requested format is not available`).
 
 Яндекс.Музыка: экстрактор yt-dlp сломан после переезда сервиса на новый
@@ -144,14 +130,13 @@ Deno ищется в порядке `deno-path` → `PATH` → `~/.deno/bin/deno
 (30 с) считается ошибкой. Если ссылка ведёт на альбом/плейлист, а не на трек,
 загрузка не поддерживается.
 
-Осталось решить владельцу:
+Имя файла задаётся настройкой `filename-template` (по умолчанию `%(title).100s`):
+одноимённые видео затирают друг друга; чтобы исключить — включите вариант с
+`%(id)s`.
 
-- Имя файла задаётся настройкой `filename-template` (по умолчанию
-  `%(title).100s`): одноимённые видео затирают друг друга, пока владелец не
-  включит вариант с `%(id)s` (D5).
-- Секреты (`settings.json`, `cookies.txt`, `downloads.db`, лог) в `.gitignore` —
-  **не коммитить и не печатать их содержимое**. Копии базы `downloads.db.*.bak`
-  тоже в `.gitignore`, но содержат реальные данные — не публиковать.
+Секреты (`settings.json`, `cookies.txt`, `downloads.db`, лог) в `.gitignore` —
+**не коммитить и не печатать их содержимое**. Копии базы `downloads.db.*.bak`
+тоже в `.gitignore`, но содержат реальные данные — не публиковать.
 
 ## Соглашения для агентов
 

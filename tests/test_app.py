@@ -90,8 +90,8 @@ def test_main_reports_missing_settings(project):
     assert exc.value.code == 2
 
 
-def test_importing_bot_does_not_load_whisper(project, monkeypatch):
-    """D14: раньше `import bot` тянул torch и ~4.5 ГБ RSS на импорте."""
+def test_importing_the_app_does_not_load_whisper(project, monkeypatch):
+    """D14: раньше импорт точки входа тянул torch и ~4.5 ГБ RSS."""
     import sys
     import types
 
@@ -99,24 +99,20 @@ def test_importing_bot_does_not_load_whisper(project, monkeypatch):
     loaded: list = []
     sentinel.load_model = lambda *args, **kwargs: loaded.append(args) or types.SimpleNamespace()
     monkeypatch.setitem(sys.modules, "whisper", sentinel)
-    sys.modules.pop("bot", None)
+    sys.modules.pop("tune_loader_bot.app", None)
     try:
-        importlib.import_module("bot")
+        importlib.import_module("tune_loader_bot.app")
         assert loaded == [], "модель не должна грузиться на импорте"
     finally:
-        sys.modules.pop("bot", None)
+        sys.modules.pop("tune_loader_bot.app", None)
 
 
 def test_module_entry_point_exists():
+    """`python -m tune_loader_bot` ведёт в `app.main` (импорт без запуска)."""
     module = importlib.import_module("tune_loader_bot.__main__")
+    app = importlib.import_module("tune_loader_bot.app")
 
-    assert module.main is app_module.main
-
-
-def test_bot_py_is_a_shim_for_the_app():
-    bot_module = importlib.import_module("bot")
-
-    assert bot_module.main is app_module.main
+    assert module.main is app.main
 
 
 @pytest.mark.parametrize(

@@ -9,7 +9,8 @@
             "name": "tune_loader_bot",
             "type": "debugpy",
             "request": "launch",
-            "program": "bot.py",
+            "module": "tune_loader_bot",
+            "cwd": "${workspaceFolder}",
             "console": "integratedTerminal",
             "justMyCode": false
         }

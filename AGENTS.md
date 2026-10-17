@@ -5,10 +5,11 @@ Telegram-бот, который по ссылке скачивает аудио 
 автоматически следить за YouTube-плейлистами/каналами по подпискам. Дополнительно
 расшифровывает голосовые сообщения в текст (OpenAI Whisper).
 
-Весь код — в пакете `tune_loader_bot/`; в корне остаётся только `bot.py` — шим на
-13 строк для systemd (`python bot.py` == `python -m tune_loader_bot`). Есть тесты
-(pytest, 324) и линт (ruff), CI на GitHub Actions. Поэтапный рефакторинг завершён
-(фазы 0-8): план, карта дефектов и журнал прогресса — в `REFACTORING_PLAN.md`.
+Весь код — в пакете `tune_loader_bot/`; в корне только настройки, скрипты и
+документация. Запуск — `python -m tune_loader_bot` (systemd-юнит использует именно
+его). Есть тесты (pytest) и линт (ruff), CI на GitHub Actions. Поэтапный
+рефакторинг завершён (фазы 0-8): план, карта дефектов и журнал прогресса — в
+`REFACTORING_PLAN.md`.
 
 ## Стек
 
@@ -25,7 +26,6 @@ Telegram-бот, который по ссылке скачивает аудио 
 
 | Файл | Роль |
 |---|---|
-| `bot.py` | Шим для systemd: `python bot.py` → `tune_loader_bot.app:main` |
 | `tune_loader_bot/media/` | `paths.py` (раскладка файлов, публичные ссылки), `ytdlp.py` (опции, загрузка, разбор плейлиста) |
 | `tune_loader_bot/telegram/` | Тексты, клавиатура, подписи, доставка, обработчики, голосовые, middleware, `create_dispatcher` |
 | `tune_loader_bot/library.py` | Медиатека: найти готовое или скачать и сохранить (прикладной слой) |
@@ -73,8 +73,8 @@ Telegram-бот, который по ссылке скачивает аудио 
    отдаёт `WhisperTranscriber` — модель грузится **при первом голосовом** (в потоке,
    с `Semaphore(1)`), язык/модель из настроек, `whisper-enabled` выключает фичу,
    а отсутствие пакета не роняет бота. Ответ — `message.reply`.
-9. **Запуск**: `.venv/bin/python -m tune_loader_bot` из корня проекта (то же делает
-   `python bot.py`); настройки и БД ищутся относительно CWD, путь к настройкам —
+9. **Запуск**: `.venv/bin/python -m tune_loader_bot` из корня проекта; настройки и
+   БД ищутся относительно CWD, путь к настройкам —
    `$TUNE_LOADER_SETTINGS`. Композиция и остановка — в `tune_loader_bot/app.py`:
    по SIGTERM aiogram завершает polling, приложение закрывает БД и отменяет watchdog.
    В бою — `tune-loader-bot.service` от пользователя `denis`, лог
@@ -106,7 +106,7 @@ Telegram-бот, который по ссылке скачивает аудио 
 
 ```bash
 source .venv/bin/activate
-python bot.py                                   # локальный запуск
+python -m tune_loader_bot                       # локальный запуск
 sudo ./install-service-systemd.sh               # установка systemd-юнита
 systemctl status|restart tune-loader-bot
 journalctl/tail -f tune-loader-bot.log
@@ -161,6 +161,6 @@ Deno ищется в порядке `deno-path` → `PATH` → `~/.deno/bin/deno
 - Новый код — в пакете `tune_loader_bot/`, зависимости передаются явно
   (`Settings`, `Storage`, `MediaLibrary`, `HandlerContext`). Запуск —
   `python -m tune_loader_bot`, работа с базой — `python -m tune_loader_bot.migrate`.
-- Проверка в бою — запуск `python bot.py` и логи. Сервис под systemd,
+- Проверка в бою — запуск `python -m tune_loader_bot` и логи. Сервис под systemd,
   не перезапускать его без явной просьбы.
 - `AGENTS.md` — краткое описание, обновлять при изменениях архитектуры.

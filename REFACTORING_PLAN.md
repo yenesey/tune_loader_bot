@@ -148,8 +148,9 @@ tune_loader_bot/                # пакет (ставится/запускае�
   (включая middleware) → в тестах и в бою объект один и тот же.
 - Слой `domain/services.py` — единственный источник правды о сервисах: он же
   кормит `check_url`, клавиатуру и параметры yt-dlp (устраняет D10/D11/D23).
-- Совместимость: корневой `bot.py` остаётся тонким шимом
-  (`from tune_loader_bot.app import main`), чтобы systemd-юнит не менялся.
+- Совместимость: пока systemd-юнит вызывал `python bot.py`, в корне лежал шим на
+  13 строк. После перевода юнита на `python -m tune_loader_bot` шим удалён
+  (см. журнал §8).
 
 Альтернатива «минимум телодвижений»: не заводить пакет, а разложить корень на
 `bot.py`, `handlers.py`, `media.py`, `storage.py`, `services.py`, `watchdog.py`,
@@ -679,3 +680,11 @@ Non-goals: смена СУБД, веб-интерфейс, изменение п
   сервис поднялся на новом коде в 19:28:00 и сам применил миграцию
   (`user_version` 0 → 1, `journal_mode` wal, 2065 записей, 0 `NULL user_id`,
   2 подписки, бэкап `downloads.db.20261016-192759.bak`) · —
+- 2026-10-17 · после фаз · systemd-юнит переведён владельцем на
+  `ExecStart=…/.venv/bin/python -m tune_loader_bot` (WorkingDirectory сохранён),
+  сервис запущен на нём с 16.10 19:38 — шим `bot.py` больше не нужен и удалён.
+  Вместе с ним убраны его тест, фикстуры `project_modules`/`bot_module`/
+  `whisper_stub`, ссылки в `README.md`, `AGENTS.md`, `.vscode/launch.json`
+  (теперь `module: tune_loader_bot`) и §2. Проверено: `python -m
+  tune_loader_bot` без `settings.json` даёт код 2 и понятное сообщение,
+  `import bot` в коде не осталось · 326 passed, ruff clean · —

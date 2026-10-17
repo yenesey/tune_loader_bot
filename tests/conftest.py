@@ -14,15 +14,9 @@
 import importlib
 import json
 import sqlite3
-import sys
-import types
 from pathlib import Path
 
 import pytest
-
-# Модуль точки входа: переимпортируется в каждом тесте, чтобы не «протекало»
-# состояние модуля (переходные settings/download/database удалены в фазе 8).
-PROJECT_MODULES = ("bot",)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 LIVE_DB = REPO_ROOT / "downloads.db"
@@ -95,36 +89,6 @@ def settings(project):
     config = importlib.import_module("tune_loader_bot.config")
     config.reset_settings_cache()
     return config.get_settings()
-
-
-@pytest.fixture
-def whisper_stub(monkeypatch):
-    """Заглушка whisper: без torch и без загрузки модели (~1.4 ГБ)."""
-    fake = types.ModuleType("whisper")
-    fake.load_model = lambda *args, **kwargs: types.SimpleNamespace(
-        transcribe=lambda *a, **k: {"text": ""}
-    )
-    monkeypatch.setitem(sys.modules, "whisper", fake)
-    return fake
-
-
-@pytest.fixture
-def project_modules(project, whisper_stub):
-    """Импортирует модули проекта так, будто они запущены из `project`."""
-    # config остаётся в sys.modules (стабильная идентичность класса ConfigError),
-    # но кэш настроек чистим: иначе settings.SETTINGS указывал бы на CWD
-    # предыдущего теста.
-    importlib.import_module("tune_loader_bot.config").reset_settings_cache()
-    for name in PROJECT_MODULES:
-        sys.modules.pop(name, None)
-    yield {name: importlib.import_module(name) for name in PROJECT_MODULES}
-    for name in PROJECT_MODULES:
-        sys.modules.pop(name, None)
-
-
-@pytest.fixture
-def bot_module(project_modules):
-    return project_modules["bot"]
 
 
 @pytest.fixture

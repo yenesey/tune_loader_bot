@@ -37,7 +37,7 @@ python3 -m venv .venv
 .venv/bin/pip install -r requirements-whisper.txt     # опционально: Whisper + torch
 cp settings.example.json settings.json               # и заполнить своими значениями
 
-.venv/bin/python -m tune_loader_bot                   # запуск (то же, что python bot.py)
+.venv/bin/python -m tune_loader_bot                   # запуск
 ```
 
 Установка systemd-юнита (нужен root, перезапускает сервис):
@@ -75,7 +75,6 @@ guard'ом в `tests/conftest.py` (тест, изменивший рабочую
 ## Структура
 
 ```
-bot.py                     # совместимая точка входа (python bot.py)
 tune_loader_bot/
 ├── __main__.py            # python -m tune_loader_bot
 ├── app.py                 # композиция: сборка, запуск, остановка

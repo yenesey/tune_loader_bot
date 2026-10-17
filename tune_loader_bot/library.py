@@ -22,7 +22,7 @@ from typing import Any
 
 from tune_loader_bot.config import Settings
 from tune_loader_bot.domain import services
-from tune_loader_bot.media import paths, ytdlp
+from tune_loader_bot.media import paths, yandex, ytdlp
 from tune_loader_bot.storage.db import Storage
 
 LOGGER = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ class MediaLibrary:
     ) -> None:
         self._settings = settings
         self._storage = storage
-        self._downloader = downloader or self._download_via_ytdlp
+        self._downloader = downloader or self._download_media
         self._now = now
 
     @property
@@ -115,10 +115,16 @@ class MediaLibrary:
 
     # --- внутреннее -------------------------------------------------------
 
-    async def _download_via_ytdlp(
+    async def _download_media(
         self, target: Any, service: str | None, url: str, video: bool
     ) -> dict[str, Any] | None:
-        result = await ytdlp.download_media(self._settings, target, service, url, video=video)
+        """Выбирает загрузчик: у Яндекс.Музыки свой API вместо сломанного yt-dlp."""
+        if service == "yandex" and not video:
+            result = await yandex.download_media(self._settings, target, url)
+        else:
+            result = await ytdlp.download_media(
+                self._settings, target, service, url, video=video
+            )
         return result.as_dict() if result else None
 
     def _enrich(self, record: dict[str, Any]) -> dict[str, Any] | None:

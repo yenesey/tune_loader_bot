@@ -26,7 +26,7 @@ Telegram-бот, который по ссылке скачивает аудио 
 
 | Файл | Роль |
 |---|---|
-| `tune_loader_bot/media/` | `paths.py` (раскладка файлов, публичные ссылки), `ytdlp.py` (опции, загрузка, разбор плейлиста) |
+| `tune_loader_bot/media/` | `paths.py` (раскладка файлов, публичные ссылки), `ytdlp.py` (опции, загрузка, разбор плейлиста), `yandex.py` (прямая загрузка Яндекс.Музыки в обход yt-dlp) |
 | `tune_loader_bot/telegram/` | Тексты, клавиатура, подписи, доставка, обработчики, голосовые, middleware, `create_dispatcher` |
 | `tune_loader_bot/library.py` | Медиатека: найти готовое или скачать и сохранить (прикладной слой) |
 | `tune_loader_bot/jobs/` | `watchdog.py` — фоновый обход подписок (`SubscriptionWatcher`) |
@@ -57,7 +57,8 @@ Telegram-бот, который по ссылке скачивает аудио 
 4. **Посты в канале** (`channel_post`): ссылка сразу скачивается как аудио, без диалога
    (`user_id = 0` в БД). `delivered=0` остаётся — такие файлы досылает watchdog.
 5. **`MediaLibrary`** (`library.py`): сначала ищет запись в БД и проверяет, что файл есть
-   на диске, иначе качает (`media/ytdlp.py`) и сохраняет. **`Delivery`** решает, отправить
+   на диске, иначе качает (`media/ytdlp.py`; для Яндекс.Музыки — `media/yandex.py`)
+   и сохраняет. **`Delivery`** решает, отправить
    файл (≤ `tg-max-file-size`) или ссылку на `server-root-url`, и помечает `delivered`.
    Исходное сообщение удаляется best-effort.
 6. **Файлы на диске**: `{download-dir}/{YYYY}/{YYYY-MM}/{title}` — `sub_dir()` + `enrich_info()`
@@ -112,7 +113,7 @@ systemctl status|restart tune-loader-bot
 journalctl/tail -f tune-loader-bot.log
 ```
 
-Требуется `settings.json` в CWD, `cookies.txt` для YouTube и Deno
+Требуется `settings.json` в CWD, `cookies.txt` для YouTube и Яндекс.Музыки и Deno
 (`deno-path` → `PATH` → `~/.deno/bin/deno`).
 Миграции базы — `.venv/bin/python -m tune_loader_bot.migrate --report|--check|--apply`.
 
@@ -135,6 +136,13 @@ Deno ищется в порядке `deno-path` → `PATH` → `~/.deno/bin/deno
 `deno-path` работает только третий шаг — на нём YouTube и держится (регрессия
 16.10.2026: без JS-рантайма yt-dlp не решает n-challenge и пишет
 `Requested format is not available`).
+
+Яндекс.Музыка: экстрактор yt-dlp сломан после переезда сервиса на новый
+фронтенд (старые `/handlers/*.jsx` отвечают 301). Поэтому `media/yandex.py`
+ходит в `api.music.yandex.ru` с cookies из `cookies.txt` (домен `.yandex.ru`,
+аккаунт должен быть с Плюсом) и скачивает полный mp3; ответ «только превью»
+(30 с) считается ошибкой. Если ссылка ведёт на альбом/плейлист, а не на трек,
+загрузка не поддерживается.
 
 Осталось решить владельцу:
 

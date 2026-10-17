@@ -24,7 +24,8 @@ Rutube, Coub, TikTok, Instagram), складывает файлы в локал�
 - [Deno](https://deno.com/) — для расшифровки части форматов YouTube
   (путь задаётся настройкой `deno-path`, иначе ищется в `PATH`)
 - `settings.json` в корне проекта (секреты, пути) — образец: `settings.example.json`
-- `cookies.txt` для YouTube
+- `cookies.txt` для YouTube и Яндекс.Музыки (для Яндекса нужен аккаунт с Плюсом:
+  без него API отдаёт только 30-секундное превью)
 - Опционально: `openai-whisper` + `torch` (`requirements-whisper.txt`) — без них
   бот работает, распознавание голосовых выключается
 
@@ -83,7 +84,7 @@ tune_loader_bot/
 ├── library.py             # медиатека: найти готовое или скачать
 ├── migrate.py             # CLI миграций
 ├── domain/                # модели и реестр сервисов (без I/O)
-├── media/                 # раскладка файлов + обёртка yt-dlp
+├── media/                 # раскладка файлов, yt-dlp и загрузка Яндекс.Музыки
 ├── storage/               # SQLite: соединение и миграции
 ├── telegram/              # тексты, клавиатура, доставка, обработчики, голосовые
 ├── jobs/                  # watchdog подписок

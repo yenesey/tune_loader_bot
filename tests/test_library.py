@@ -127,3 +127,62 @@ async def test_video_flag_is_stored_separately(make_library, storage):
 
     assert await storage.find_download(URL, True, 111) is not None
     assert await storage.find_download(URL, False, 111) is None
+
+
+async def test_yandex_url_uses_direct_downloader(settings, storage, monkeypatch):
+    """Yandex Music идёт своим API, а не сломанным экстрактором yt-dlp."""
+    from tune_loader_bot.media import yandex
+    from tune_loader_bot.media.ytdlp import MediaResult
+
+    calls = []
+
+    async def fake_download(settings_arg, target, url):
+        calls.append((settings_arg, Path(target), url))
+        path = Path(target) / "yandex.mp3"
+        path.write_bytes(b"yandex-bytes")
+        return MediaResult(
+            file_name="yandex.mp3",
+            file_path=str(path),
+            file_size=12,
+            title="Yandex Title",
+            artist="Yandex Artist",
+        )
+
+    monkeypatch.setattr(yandex, "download_media", fake_download)
+    library = MediaLibrary(settings, storage, now=lambda: NOW)
+    url = "https://music.yandex.ru/album/1/track/2"
+
+    record = await library.download(url, False, 111)
+
+    assert record is not None
+    assert record["title"] == "Yandex Title"
+    assert record["performer"] == "Yandex Artist"
+    assert calls == [(settings, Path(settings.download_dir) / "2026" / "2026-10", url)]
+
+
+async def test_other_services_still_use_ytdlp(settings, storage, monkeypatch):
+    from tune_loader_bot.media import ytdlp
+    from tune_loader_bot.media.ytdlp import MediaResult
+
+    calls = []
+
+    async def fake_download(settings_arg, target, service, url, *, video=False):
+        calls.append((service, url, video))
+        path = Path(target) / "tube.mp3"
+        path.write_bytes(b"tube-bytes")
+        return MediaResult(
+            file_name="tube.mp3",
+            file_path=str(path),
+            file_size=10,
+            title="Tube Title",
+            artist="Tube Artist",
+        )
+
+    monkeypatch.setattr(ytdlp, "download_media", fake_download)
+    library = MediaLibrary(settings, storage, now=lambda: NOW)
+
+    record = await library.download(URL, False, 111)
+
+    assert record is not None
+    assert record["title"] == "Tube Title"
+    assert calls == [("youtube", URL, False)]
